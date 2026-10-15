@@ -1,9 +1,17 @@
-# SPDX-FileCopyrightText: (C) 2025 Deskflow Developers
+# SPDX-FileCopyrightText: (C) 2025 - 2026 Deskflow Developers
 # SPDX-License-Identifier: MIT
 
 if(WIN32)
   set(extra_libs version)
 endif()
+
+create_test(
+  NAME MonitorEdgeTests
+  DEPENDS base
+  LIBS arch ${extra_libs}
+  SOURCE MonitorEdgeTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
+)
 
 create_test(
   NAME StringTests
