@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+# SPDX-License-Identifier: MIT
+
+name: Monitor edge test build
+
+on:
+  push:
+    branches: [feat/windows-monitor-edge-links]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: amd64
+          spectre: true
+      - name: Install dependencies
+        id: deps
+        uses: ./.github/actions/install-dependencies
+        with:
+          qt-version: '6.12'
+          vcpkg-triplet: x64-windows-release
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${{ steps.deps.outputs.vcpkg-cmake-config }}
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure
+      - name: Package portable binaries
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE build/bin/LICENSE
+          Copy-Item -Recurse LICENSES build/bin/LICENSES
+          Copy-Item docs/dev/monitor-edge-switching.md build/bin/monitor-edge-switching.md
+          Compress-Archive -Path build/bin/* -DestinationPath deskflow-monitor-edge-windows-x64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deskflow-monitor-edge-windows-x64
+          path: deskflow-monitor-edge-windows-x64.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-test-logs
+          path: build/src/unittests/Testing/Temporary/*.log
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install checkers
+        run: pipx install clang-format==20.1.0 && pipx install reuse
+      - name: Format
+        run: git diff --name-only origin/master...HEAD | grep -E '\.(cpp|h)$' | xargs -r clang-format --dry-run --Werror
+      - name: Licenses
+        run: reuse lint
+
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            container: ''
+            like: ''
+          - os: ubuntu-latest
+            container: debian:testing-slim
+            like: debian
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 35
+    steps:
+      - name: Install Git
+        if: matrix.container != ''
+        run: apt-get update -qq && apt-get install -y git
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/install-dependencies
+        with:
+          qt-version: '6.12'
+          like: ${{ matrix.like }}
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure
