@@ -35,7 +35,12 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
+          MONITOR_LAYOUT_SCREENSHOT: ${{ github.workspace }}/monitor-layout-editor.png
         run: ctest --test-dir build/src/unittests --output-on-failure
+      - uses: actions/upload-artifact@v7
+        with:
+          name: monitor-layout-editor-preview
+          path: monitor-layout-editor.png
       - name: Package portable binaries
         shell: pwsh
         run: |

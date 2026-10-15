@@ -8,13 +8,14 @@
 
 #pragma once
 
-#include "ComputerSetupModel.h"
 #include "common/NetworkProtocol.h"
-#include "config/ServerConfig.h"
+#include "gui/ComputerSetupModel.h"
+#include "gui/config/ServerConfig.h"
 
 #include <QDialog>
 
 class SettingsDialogButtonBox;
+class MonitorLayoutWidget;
 class QItemSelection;
 
 namespace Ui {
@@ -120,4 +121,5 @@ private:
   ServerConfig m_serverConfig;
   ComputerSetupModel m_computerSetupModel;
   SettingsDialogButtonBox *m_buttonBox = nullptr;
+  MonitorLayoutWidget *m_monitorLayout = nullptr;
 };

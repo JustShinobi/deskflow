@@ -12,6 +12,7 @@ class MonitorEdgeTests : public QObject
 {
   Q_OBJECT
 private Q_SLOTS:
+  void restore_explicitEntry_preservesMonitorWithOvershoot();
   void project_monitorEdge_mapsToDesktop_data();
   void project_monitorEdge_mapsToDesktop();
   void restore_projectedPoint_returnsToMonitor_data();

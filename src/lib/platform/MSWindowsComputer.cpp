@@ -517,15 +517,22 @@ uint32_t MSWindowsComputer::activeSides()
   return m_hook.getSides();
 }
 
+void MSWindowsComputer::setEntryDirection(Direction direction)
+{
+  m_entryDirection = direction;
+}
+
 void MSWindowsComputer::warpCursor(int32_t x, int32_t y)
 {
   if (m_isPrimary && !m_isOnComputer) {
     for (const auto &edge : m_monitorEdges) {
-      if ((activeSides() & (1u << static_cast<int>(edge.side()))) != 0 && edge.restore(x, y, getJumpZoneSize())) {
+      if (edge.side() == m_entryDirection && edge.restore(x, y, getJumpZoneSize(), true)) {
+        LOG_DEBUG("restored monitor entry at %+d,%+d", x, y);
         break;
       }
     }
   }
+  m_entryDirection = Direction::NoDirection;
   // warp mouse
   warpCursorNoFlush(x, y);
 

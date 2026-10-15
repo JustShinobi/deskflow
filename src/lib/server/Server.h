@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2025 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
@@ -222,7 +223,9 @@ private:
   int32_t getJumpZoneSize(const BaseClientProxy *) const;
 
   // change the active m_computer
-  void switchComputer(BaseClientProxy *, int32_t x, int32_t y, bool forScreenSaver);
+  void switchComputer(
+      BaseClientProxy *, int32_t x, int32_t y, bool forScreenSaver, Direction exitDirection = Direction::NoDirection
+  );
 
   // jump to computer
   void jumpToComputer(BaseClientProxy *);
@@ -305,6 +308,7 @@ private:
 
   // event handlers
   void handleShapeChanged(BaseClientProxy *client);
+  void cacheRemoteShape(BaseClientProxy *client) const;
   void handleClipboardGrabbed(const Event &event, BaseClientProxy *client);
   void handleClipboardChanged(const Event &event, BaseClientProxy *client);
   void handleKeyDownEvent(const Event &event);

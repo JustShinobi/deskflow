@@ -182,4 +182,42 @@ void MonitorEdgeTests::restore_exposedEndpoints_staysOnMonitor()
   }
 }
 
+void MonitorEdgeTests::restore_explicitEntry_preservesMonitorWithOvershoot()
+{
+  for (const auto direction : {Direction::Left, Direction::Right, Direction::Top, Direction::Bottom}) {
+    const MonitorEdge edge(direction, Monitor, Desktop, Monitors);
+    for (const int depth : {2, 9, 100, 10000}) {
+      int x = 0;
+      int y = 720;
+      if (direction == Direction::Top || direction == Direction::Bottom) {
+        x = 4708;
+        y = direction == Direction::Top ? 0 : 1439;
+      } else if (direction == Direction::Right) {
+        x = 5119;
+      }
+      QVERIFY(edge.project(x, y, 1));
+      if (direction == Direction::Left)
+        x += depth;
+      if (direction == Direction::Right)
+        x -= depth;
+      if (direction == Direction::Top)
+        y += depth;
+      if (direction == Direction::Bottom)
+        y -= depth;
+      QVERIFY(edge.restore(x, y, 1, true));
+      QVERIFY(x >= 0 && x < Monitor.width);
+      QVERIFY(y >= 0 && y < Monitor.height);
+      if (direction == Direction::Left)
+        QCOMPARE(x, 2);
+      if (direction == Direction::Right)
+        QCOMPARE(x, Monitor.width - 3);
+      if (direction == Direction::Top)
+        QCOMPARE(y, 2);
+      if (direction == Direction::Bottom)
+        QCOMPARE(y, Monitor.height - 3);
+      QVERIFY(!edge.project(x, y, 1));
+    }
+  }
+}
+
 QTEST_MAIN(MonitorEdgeTests)
