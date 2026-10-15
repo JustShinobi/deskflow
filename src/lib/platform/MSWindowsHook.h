@@ -1,11 +1,14 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2011 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 
 #pragma once
+
+#include "base/MonitorEdge.h"
 
 #include <stdint.h>
 
@@ -59,6 +62,9 @@ public:
   uint32_t getSides();
 
   void setZone(int32_t x, int32_t y, int32_t w, int32_t h, int32_t jumpZoneSize);
+
+  //! Replace configured desktop sides with physical monitor jump zones.
+  void setMonitorEdges(uint32_t sides, const std::vector<deskflow::MonitorEdge> &edges);
 
   void setMode(EHookMode mode);
 

@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2011 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -32,6 +33,9 @@ static int32_t g_xComputer = 0;
 static int32_t g_yComputer = 0;
 static int32_t g_wComputer = 0;
 static int32_t g_hComputer = 0;
+static uint32_t g_monitorSides = 0;
+static std::vector<deskflow::MonitorEdge> g_monitorEdges;
+static std::mutex g_monitorEdgesMutex;
 static WPARAM g_deadVirtKey = 0;
 static WPARAM g_deadRelease = 0;
 static LPARAM g_deadLParam = 0;
@@ -145,6 +149,13 @@ void MSWindowsHook::setMode(EHookMode mode)
     return;
   }
   g_mode = mode;
+}
+
+void MSWindowsHook::setMonitorEdges(uint32_t sides, const std::vector<deskflow::MonitorEdge> &edges)
+{
+  std::lock_guard<std::mutex> lock(g_monitorEdgesMutex);
+  g_monitorSides = sides;
+  g_monitorEdges = edges;
 }
 
 bool MSWindowsHook::getPhysicalKeyState(BYTE keys[256])
@@ -573,17 +584,33 @@ static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
 
       // check for mouse inside jump zone
       bool inside = false;
+      std::lock_guard<std::mutex> lock(g_monitorEdgesMutex);
+      POINT cursor{};
+      const bool haveCursor = !g_monitorEdges.empty() && GetCursorPos(&cursor);
+      for (const auto &edge : g_monitorEdges) {
+        if ((g_zoneSides & (1u << static_cast<int>(edge.side()))) == 0 || !haveCursor ||
+            !edge.contains(cursor.x, cursor.y)) {
+          continue;
+        }
+        int32_t projectedX = x;
+        int32_t projectedY = y;
+        inside = edge.project(projectedX, projectedY, g_zoneSize);
+        if (inside) {
+          break;
+        }
+      }
+      const uint32_t desktopSides = g_zoneSides & ~g_monitorSides;
       using enum DirectionMask;
-      if (!inside && (g_zoneSides & static_cast<int>(LeftMask)) != 0) {
+      if (!inside && (desktopSides & static_cast<int>(LeftMask)) != 0) {
         inside = (x < g_xComputer + g_zoneSize);
       }
-      if (!inside && (g_zoneSides & static_cast<int>(RightMask)) != 0) {
+      if (!inside && (desktopSides & static_cast<int>(RightMask)) != 0) {
         inside = (x >= g_xComputer + g_wComputer - g_zoneSize);
       }
-      if (!inside && (g_zoneSides & static_cast<int>(TopMask)) != 0) {
+      if (!inside && (desktopSides & static_cast<int>(TopMask)) != 0) {
         inside = (y < g_yComputer + g_zoneSize);
       }
-      if (!inside && (g_zoneSides & static_cast<int>(BottomMask)) != 0) {
+      if (!inside && (desktopSides & static_cast<int>(BottomMask)) != 0) {
         inside = (y >= g_yComputer + g_hComputer - g_zoneSize);
       }
 

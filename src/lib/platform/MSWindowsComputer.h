@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "base/MonitorEdge.h"
+
 #include "deskflow/PlatformComputer.h"
 #include "platform/MSWindowsHook.h"
 #include "platform/MSWindowsPowerManager.h"
@@ -272,6 +274,8 @@ private:
 
   // true if system appears to have multiple monitors
   bool m_multimon = false;
+  std::vector<deskflow::MonitorEdge> m_monitorEdges;
+  uint32_t m_monitorSides = 0;
 
   // last mouse position
   int32_t m_xCursor = 0;

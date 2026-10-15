@@ -30,6 +30,7 @@
 
 #include <Shlobj.h>
 #include <algorithm>
+#include <array>
 #include <comutil.h>
 #include <string.h>
 
@@ -517,6 +518,13 @@ uint32_t MSWindowsComputer::activeSides()
 
 void MSWindowsComputer::warpCursor(int32_t x, int32_t y)
 {
+  if (m_isPrimary && !m_isOnComputer) {
+    for (const auto &edge : m_monitorEdges) {
+      if ((activeSides() & (1u << static_cast<int>(edge.side()))) != 0 && edge.restore(x, y, getJumpZoneSize())) {
+        break;
+      }
+    }
+  }
   // warp mouse
   warpCursorNoFlush(x, y);
 
@@ -1234,9 +1242,8 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
 
   LOG_VERBOSE("mouse move - motion delta: %+d=(%+d - %+d),%+d=(%+d - %+d)", x, mx, m_xCursor, y, my, m_yCursor);
 
-  // ignore if the mouse didn't move or if message posted prior
-  // to last mark change.
-  if (ignore() || (x == 0 && y == 0)) {
+  // Discard events queued before the last cursor warp.
+  if (ignore()) {
     return true;
   }
 
@@ -1244,9 +1251,43 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
   saveMousePosition(mx, my);
 
   if (m_isOnComputer) {
+    int32_t reportX = m_xCursor;
+    int32_t reportY = m_yCursor;
+    bool projected = false;
+    POINT cursor{};
+    const bool haveCursor = !m_monitorEdges.empty() && getThisCursorPos(&cursor);
+    for (const auto &edge : m_monitorEdges) {
+      if ((activeSides() & (1u << static_cast<int>(edge.side()))) != 0 && haveCursor &&
+          edge.contains(cursor.x, cursor.y) && edge.project(reportX, reportY, getJumpZoneSize() + 3)) {
+        projected = true;
+        break;
+      }
+    }
+    if (!projected) {
+      const int32_t zone = getJumpZoneSize();
+      using enum DirectionMask;
+      if ((m_monitorSides & static_cast<uint32_t>(LeftMask)) != 0) {
+        reportX = (std::max)(reportX, m_x + zone);
+      }
+      if ((m_monitorSides & static_cast<uint32_t>(RightMask)) != 0) {
+        reportX = (std::min)(reportX, m_x + m_w - 1 - zone);
+      }
+      if ((m_monitorSides & static_cast<uint32_t>(TopMask)) != 0) {
+        reportY = (std::max)(reportY, m_y + zone);
+      }
+      if ((m_monitorSides & static_cast<uint32_t>(BottomMask)) != 0) {
+        reportY = (std::min)(reportY, m_y + m_h - 1 - zone);
+      }
+    }
+    if (x == 0 && y == 0 && !projected) {
+      return true;
+    }
     // motion on primary computer
-    sendEvent(EventTypes::PrimaryComputerMotionOnPrimary, MotionInfo::alloc(m_xCursor, m_yCursor));
+    sendEvent(EventTypes::PrimaryComputerMotionOnPrimary, MotionInfo::alloc(reportX, reportY));
   } else {
+    if (x == 0 && y == 0) {
+      return true;
+    }
     // the motion is on the secondary computer, so we warp mouse back to
     // center on the server computer. if we don't do this, then the mouse
     // will always try to return to the original entry point on the
@@ -1443,6 +1484,59 @@ void MSWindowsComputer::updateComputerShape()
 
   // tell the desks
   m_desks->setShape(m_x, m_y, m_w, m_h, m_xCenter, m_yCenter, m_multimon);
+
+  if (!m_isPrimary) {
+    return;
+  }
+
+  std::vector<MONITORINFOEXW> monitors;
+  EnumDisplayMonitors(
+      nullptr, nullptr,
+      [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, reinterpret_cast<MONITORINFO *>(&info))) {
+          reinterpret_cast<std::vector<MONITORINFOEXW> *>(data)->push_back(info);
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&monitors)
+  );
+  std::vector<deskflow::MonitorRect> rectangles;
+  for (const auto &info : monitors) {
+    const auto &r = info.rcMonitor;
+    rectangles.push_back({r.left, r.top, r.right - r.left, r.bottom - r.top});
+  }
+  const std::array keys = {
+      Settings::Server::SwitchMonitorLeft, Settings::Server::SwitchMonitorRight, Settings::Server::SwitchMonitorTop,
+      Settings::Server::SwitchMonitorBottom
+  };
+  m_monitorEdges.clear();
+  m_monitorSides = 0;
+  for (size_t i = 0; i < keys.size(); ++i) {
+    const auto selector = Settings::value(keys.at(i)).toString().trimmed();
+    if (selector.isEmpty()) {
+      continue;
+    }
+    const auto side = static_cast<Direction>(i + static_cast<size_t>(Direction::FirstDirection));
+    m_monitorSides |= 1u << static_cast<int>(side);
+    bool found = false;
+    for (size_t j = 0; j < monitors.size(); ++j) {
+      const auto &info = monitors.at(j);
+      if ((selector.compare(QStringLiteral("primary"), Qt::CaseInsensitive) == 0 &&
+           (info.dwFlags & MONITORINFOF_PRIMARY) != 0) ||
+          selector.compare(QString::fromWCharArray(info.szDevice), Qt::CaseInsensitive) == 0) {
+        m_monitorEdges.emplace_back(side, rectangles.at(j), deskflow::MonitorRect{m_x, m_y, m_w, m_h}, rectangles);
+        LOG_INFO("switch monitor for side %d: %s", static_cast<int>(side), qPrintable(selector));
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      LOG_WARN("switch monitor unavailable for side %d: %s", static_cast<int>(side), qPrintable(selector));
+    }
+  }
+  m_hook.setMonitorEdges(m_monitorSides, m_monitorEdges);
 }
 
 void MSWindowsComputer::handleFixes()
