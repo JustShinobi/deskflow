@@ -6,6 +6,14 @@ if(WIN32)
 endif()
 
 create_test(
+  NAME CursorMotionTests
+  DEPENDS base
+  LIBS arch ${extra_libs}
+  SOURCE CursorMotionTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
+)
+
+create_test(
   NAME MonitorEdgeTests
   DEPENDS base
   LIBS arch ${extra_libs}

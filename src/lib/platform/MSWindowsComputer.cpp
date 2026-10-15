@@ -293,6 +293,7 @@ void MSWindowsComputer::leave()
   if (m_isPrimary) {
     LOG_VERBOSE("centering cursor on leave: %+d, %+d", m_xCenter, m_yCenter);
     warpCursor(m_xCenter, m_yCenter);
+    m_remoteMotion.beginTransition(m_xCenter, m_yCenter, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 
     // disable special key sequences on win95 family
     enableSpecialKeys(false);
@@ -542,6 +543,7 @@ void MSWindowsComputer::saveMousePosition(int32_t x, int32_t y)
 {
   m_xCursor = x;
   m_yCursor = y;
+  m_remoteMotion.setPosition(x, y);
 
   LOG_VERBOSE("saved mouse position for next delta: %+d,%+d", x, y);
 }
@@ -1247,6 +1249,18 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
     return true;
   }
 
+  if (!m_isOnComputer) {
+    const auto motion = m_remoteMotion.moveTo(mx, my);
+    if (!motion) {
+      LOG_DEBUG("dropped stale motion after leave: %+d,%+d", mx, my);
+      saveMousePosition(m_xCenter, m_yCenter);
+      warpCursorNoFlush(m_xCenter, m_yCenter);
+      return true;
+    }
+    x = motion->x;
+    y = motion->y;
+  }
+
   // save position to compute delta of next motion
   saveMousePosition(mx, my);
 
@@ -1305,6 +1319,7 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
         -y + bogusZoneSize > m_yCenter - m_y || y + bogusZoneSize > m_y + m_h - m_yCenter) {
 
       LOG_DEBUG("dropped bogus delta motion: %+d,%+d", x, y);
+      saveMousePosition(m_xCenter, m_yCenter);
     } else {
       // send motion
       sendEvent(EventTypes::PrimaryComputerMotionOnSecondary, MotionInfo::alloc(x, y));
