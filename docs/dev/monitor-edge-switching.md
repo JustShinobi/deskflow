@@ -51,3 +51,10 @@ including moves that leave the overall desktop bounds unchanged. The general
 settings should be changed with the core stopped. Validate mixed DPI, display
 hotplug, double-tap switching and both transition directions on the actual desk
 before deploying this experimental feature.
+
+The Windows backend also guards the first 500 ms after capturing the cursor.
+Delayed hook positions near the old screen edge are discarded against a region
+derived from the primary monitor, rather than the combined desktop. Discarding
+an event resets the relative-motion baseline to the parking point so a later
+warp echo cannot produce a reverse jump. Enable debug logging to see
+`dropped stale motion after leave` when this guard rejects an event.

@@ -14,6 +14,8 @@ endif()
 add_library(base STATIC ${PLATFORM_CODE}
   BaseException.cpp
   BaseException.h
+  CursorMotion.cpp
+  CursorMotion.h
   DirectionTypes.h
   Event.h
   EventQueue.cpp

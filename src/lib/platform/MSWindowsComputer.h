@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "base/CursorMotion.h"
 #include "base/MonitorEdge.h"
 
 #include "deskflow/PlatformComputer.h"
@@ -280,6 +281,7 @@ private:
   // last mouse position
   int32_t m_xCursor = 0;
   int32_t m_yCursor = 0;
+  deskflow::CursorMotion m_remoteMotion;
 
   // last clipboard
   uint32_t m_sequenceNumber = 0;
