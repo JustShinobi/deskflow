@@ -10,6 +10,8 @@ class MonitorLayoutTests : public QObject
 {
   Q_OBJECT
 private Q_SLOTS:
+  void manualPositionAndScaleMapToNativeGeometry();
+  void manualLayoutPreservesNativeOcclusion();
   void notebookBetweenLocalMonitors();
   void overlappingComputerRejected();
   void disconnectedComputerRejected();

@@ -18,6 +18,12 @@ struct DisplayPlacement
   std::string id;
   MonitorRect rect;
   bool local;
+  MonitorRect nativeRect{};
+
+  MonitorRect nativeGeometry() const
+  {
+    return nativeRect.width > 0 && nativeRect.height > 0 ? nativeRect : rect;
+  }
 };
 
 struct MonitorLink

@@ -10,13 +10,18 @@
 #include "gui/dialogs/ServerConfigDialog.h"
 #include "gui/widgets/MonitorLayoutWidget.h"
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFont>
+#include <QFontDatabase>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QTabWidget>
 #include <algorithm>
 
@@ -33,6 +38,12 @@ std::vector<deskflow::DisplayPlacement> setup()
 } // namespace
 void MonitorLayoutWidgetTests::initTestCase()
 {
+#ifdef Q_OS_WIN
+  const auto font =
+      QFontDatabase::addApplicationFont(QDir(qEnvironmentVariable("WINDIR")).filePath("Fonts/segoeui.ttf"));
+  if (font >= 0 && !QFontDatabase::applicationFontFamilies(font).isEmpty())
+    QGuiApplication::setFont(QFont(QFontDatabase::applicationFontFamilies(font).first(), 10));
+#endif
   QVERIFY(m_temp.isValid());
   Settings::setSettingsFile(m_temp.filePath("Deskflow.conf"));
   Settings::setStateFile(m_temp.filePath("Deskflow.state"));
@@ -95,6 +106,14 @@ void MonitorLayoutWidgetTests::canvasDraggingAndRendering()
   QVERIFY(widget.displays().back().rect != before);
   widget.setDisplays(setup());
   QTest::qWait(50);
+  const QPoint localStart(qRound(left + (2983 + 2560) * scale), qRound(top + (2164 + 720) * scale));
+  QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, localStart);
+  QTest::mouseMove(canvas, localStart + QPoint(50, 30));
+  QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, localStart + QPoint(50, 30));
+  QVERIFY(widget.displays()[0].rect != local);
+  QCOMPARE(widget.displays()[0].nativeGeometry(), local);
+  widget.setDisplays(setup());
+  QTest::qWait(50);
   const auto output = qEnvironmentVariable("MONITOR_LAYOUT_SCREENSHOT");
   if (!output.isEmpty())
     QVERIFY(widget.grab().save(output));
@@ -112,7 +131,11 @@ void MonitorLayoutWidgetTests::dialogSaveAndCancel()
     ServerConfigDialog dialog(nullptr, config);
     auto *editor = dialog.findChild<MonitorLayoutWidget *>();
     QVERIFY(editor);
+#ifdef Q_OS_WIN
+    QVERIFY(editor->isEnabled());
+#else
     editor->setEnabled(true);
+#endif
     editor->setDisplays(setup());
     editor->findChild<QCheckBox *>()->setChecked(true);
     dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
@@ -123,7 +146,11 @@ void MonitorLayoutWidgetTests::dialogSaveAndCancel()
   ServerConfigDialog dialog(nullptr, config);
   auto *editor = dialog.findChild<MonitorLayoutWidget *>();
   QVERIFY(editor);
+#ifdef Q_OS_WIN
+  QVERIFY(editor->isEnabled());
+#else
   editor->setEnabled(true);
+#endif
   editor->setDisplays(setup());
   editor->findChild<QCheckBox *>()->setChecked(true);
   dialog.findChild<QTabWidget *>()->setCurrentWidget(editor);
@@ -155,6 +182,7 @@ void MonitorLayoutWidgetTests::dialogSaveAndCancel()
   auto *reopenedEditor = reopened.findChild<MonitorLayoutWidget *>();
   QVERIFY(reopenedEditor);
   reopenedEditor->setEnabled(true);
+  QVERIFY(reopened.findChild<QTabWidget *>()->isTabEnabled(0));
   auto updated = setup();
   updated.back().rect.height += 1;
   reopenedEditor->setDisplays(updated);
@@ -162,6 +190,39 @@ void MonitorLayoutWidgetTests::dialogSaveAndCancel()
   QCOMPARE(reopened.result(), int(QDialog::Accepted));
   QVERIFY(output.open(QIODevice::ReadOnly));
   QVERIFY(output.readAll().contains("keystroke(Control+Alt+z) = switchToNextScreen"));
+}
+
+void MonitorLayoutWidgetTests::localDisplaysAreEditableAndPersisted()
+{
+  Settings::setValue(Settings::Server::MonitorLayout, QVariant());
+  MonitorLayoutWidget widget("independent-server", {"remote"});
+  widget.setEnabled(true);
+  const auto originalDisplays = widget.displays();
+  QVERIFY(!originalDisplays.empty());
+  auto *selection = widget.findChild<QComboBox *>("displaySelection");
+  auto *x = widget.findChild<QSpinBox *>("layoutX");
+  auto *width = widget.findChild<QSpinBox *>("layoutWidth");
+  QVERIFY(selection && x && width);
+  selection->setCurrentIndex(0);
+  const auto native = widget.displays().front().nativeGeometry();
+  QVERIFY(x->isEnabled());
+  x->setValue(native.x + 123);
+  width->setValue(native.width / 2);
+  QCOMPARE(widget.displays().front().rect.x, native.x + 123);
+  QCOMPARE(widget.displays().front().nativeGeometry(), native);
+  widget.commit();
+  const auto saved = widget.displays().front().rect;
+  MonitorLayoutWidget reopened("independent-server", {"remote"});
+  QCOMPARE(reopened.displays().front().rect, saved);
+  QCOMPARE(reopened.displays().front().nativeGeometry(), native);
+  QVERIFY(!reopened.isModified());
+  reopened.setEnabled(true);
+  reopened.findChild<QPushButton *>("detectDisplays")->click();
+  QCOMPARE(reopened.displays().front().rect, saved);
+  reopened.setEnabled(true);
+  reopened.findChild<QPushButton *>("resetDetectedLayout")->click();
+  QCOMPARE(reopened.displays().front().rect, native);
+  QVERIFY(reopened.isModified());
 }
 
 QTEST_MAIN(MonitorLayoutWidgetTests)

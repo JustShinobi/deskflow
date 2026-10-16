@@ -99,8 +99,10 @@ std::vector<DisplayPlacement> detectDisplays(const QString &server)
     displays.push_back({{}, screen->name().toStdString(), {r.x(), r.y(), r.width(), r.height()}, true});
   }
 #endif
-  for (auto &display : displays)
+  for (auto &display : displays) {
     display.computer = server.toStdString();
+    display.nativeRect = display.rect;
+  }
   return displays;
 }
 
@@ -113,8 +115,18 @@ QString displayLabel(const DisplayPlacement &display)
       break;
     }
   }
-  return QString::fromStdString(display.computer) + "\n" + label + "\n" +
-         QStringLiteral("%1 × %2").arg(display.rect.width).arg(display.rect.height);
+  const auto native = display.nativeGeometry();
+  QString dimensions =
+      display.local
+          ? QCoreApplication::translate("MonitorLayoutWidget", "Detected: %1 x %2").arg(native.width).arg(native.height)
+          : QCoreApplication::translate("MonitorLayoutWidget", "Desktop: %1 x %2")
+                .arg(display.rect.width)
+                .arg(display.rect.height);
+  if (display.local && display.rect != native)
+    dimensions += "\n" + QCoreApplication::translate("MonitorLayoutWidget", "Layout: %1 x %2")
+                             .arg(display.rect.width)
+                             .arg(display.rect.height);
+  return QString::fromStdString(display.computer) + "\n" + label + "\n" + dimensions;
 }
 } // namespace
 
@@ -195,8 +207,10 @@ protected:
     for (size_t i = 0; i < items.size(); ++i) {
       auto &item = items[i];
       const auto &r = item.rect;
-      if (!item.local && QRectF(r.x, r.y, r.width, r.height).contains(point)) {
+      if (QRectF(r.x, r.y, r.width, r.height).contains(point)) {
         selected = m_drag = static_cast<int>(i);
+        if (item.local && item.nativeRect.width == 0)
+          item.nativeRect = item.rect;
         m_offset = point - QPointF(r.x, r.y);
         if (changed)
           changed();
@@ -263,6 +277,7 @@ MonitorLayoutWidget::MonitorLayoutWidget(const QString &server, const QStringLis
       m_canvas(new MonitorLayoutCanvas(this)),
       m_enabled(new QCheckBox(tr("Use monitor layout"), this)),
       m_remote(new QComboBox(this)),
+      m_display(new QComboBox(this)),
       m_width(new QSpinBox(this)),
       m_height(new QSpinBox(this)),
       m_x(new QSpinBox(this)),
@@ -272,8 +287,9 @@ MonitorLayoutWidget::MonitorLayoutWidget(const QString &server, const QStringLis
   auto *layout = new QVBoxLayout(this);
   layout->addWidget(m_enabled);
   auto *hint = new QLabel(
-      tr("Local displays follow Windows and stay fixed. Drag a remote desktop to a touching edge. Green edges switch "
-         "in both directions. Remote resolution is editable; one rectangle represents its entire desktop."),
+      tr("Displays are detected automatically. Select or drag any display and edit its layout size and position. "
+         "Detected Windows geometry remains the reference for cursor mapping. Green edges switch in both directions. "
+         "Local-to-local movement still follows Windows. One rectangle represents each remote desktop."),
       this
   );
   hint->setWordWrap(true);
@@ -283,25 +299,39 @@ MonitorLayoutWidget::MonitorLayoutWidget(const QString &server, const QStringLis
     if (!computer.isEmpty() && computer != server && m_remote->findText(computer) < 0)
       m_remote->addItem(computer);
   }
+  m_remote->setAccessibleName(tr("Remote computer"));
   controls->addWidget(m_remote);
-  auto *add = new QPushButton(tr("Add"), this);
-  auto *remove = new QPushButton(tr("Remove"), this);
-  auto *detect = new QPushButton(tr("Reload displays"), this);
+  auto *add = new QPushButton(tr("Add remote"), this);
+  auto *remove = new QPushButton(tr("Remove remote"), this);
+  auto *detect = new QPushButton(tr("Detect displays"), this);
+  detect->setObjectName("detectDisplays");
+  auto *reset = new QPushButton(tr("Use detected layout"), this);
+  reset->setObjectName("resetDetectedLayout");
   controls->addWidget(add);
   controls->addWidget(remove);
   controls->addWidget(detect);
+  controls->addWidget(reset);
   controls->addStretch();
   layout->addLayout(controls);
+  m_display->setObjectName("displaySelection");
+  layout->addWidget(m_display);
   auto *geometry = new QHBoxLayout;
   const std::vector<std::pair<QString, QSpinBox *>> fields = {
-      {tr("Width"), m_width}, {tr("Height"), m_height}, {tr("X"), m_x}, {tr("Y"), m_y}
+      {tr("Layout width"), m_width}, {tr("Layout height"), m_height}, {tr("X"), m_x}, {tr("Y"), m_y}
   };
   for (const auto &[label, spin] : fields) {
-    geometry->addWidget(new QLabel(label, this));
+    auto *fieldLabel = new QLabel(label, this);
+    fieldLabel->setBuddy(spin);
+    spin->setAccessibleName(label);
+    geometry->addWidget(fieldLabel);
     spin->setRange(spin == m_width || spin == m_height ? 64 : -32767, 32767);
     geometry->addWidget(spin);
-    connect(spin, &QSpinBox::valueChanged, this, &MonitorLayoutWidget::resizeRemote);
+    connect(spin, &QSpinBox::valueChanged, this, &MonitorLayoutWidget::resizeDisplay);
   }
+  m_width->setObjectName("layoutWidth");
+  m_height->setObjectName("layoutHeight");
+  m_x->setObjectName("layoutX");
+  m_y->setObjectName("layoutY");
   layout->addLayout(geometry);
   layout->addWidget(m_canvas, 1);
   m_status->setWordWrap(true);
@@ -314,23 +344,18 @@ MonitorLayoutWidget::MonitorLayoutWidget(const QString &server, const QStringLis
     refresh();
     Q_EMIT changed();
   });
-  connect(m_remote, &QComboBox::currentTextChanged, this, &MonitorLayoutWidget::selectRemote);
+  connect(m_display, &QComboBox::currentIndexChanged, this, &MonitorLayoutWidget::selectDisplay);
   connect(add, &QPushButton::clicked, this, &MonitorLayoutWidget::addRemote);
   connect(remove, &QPushButton::clicked, this, [this] {
     std::erase_if(m_canvas->items, [this](const auto &item) {
       return !item.local && item.computer == m_remote->currentText().toStdString();
     });
-    m_canvas->selected = -1;
+    rebuildDisplays();
     refresh();
     Q_EMIT changed();
   });
-  connect(detect, &QPushButton::clicked, this, [this] {
-    auto items = detectDisplays(m_server);
-    for (const auto &item : m_canvas->items)
-      if (!item.local)
-        items.push_back(item);
-    setDisplays(std::move(items));
-  });
+  connect(detect, &QPushButton::clicked, this, [this] { refreshDetectedDisplays(false); });
+  connect(reset, &QPushButton::clicked, this, [this] { refreshDetectedDisplays(true); });
   reload();
 #ifndef Q_OS_WIN
   setEnabled(false);
@@ -341,7 +366,7 @@ MonitorLayoutWidget::MonitorLayoutWidget(const QString &server, const QStringLis
 void MonitorLayoutWidget::setDisplays(std::vector<DisplayPlacement> displays)
 {
   m_canvas->items = std::move(displays);
-  selectRemote();
+  rebuildDisplays();
   refresh();
   Q_EMIT changed();
 }
@@ -361,7 +386,7 @@ void MonitorLayoutWidget::setComputerNames(const QStringList &computers)
   }
   if (m_remote->findText(current) >= 0)
     m_remote->setCurrentText(current);
-  selectRemote();
+  rebuildDisplays();
 }
 
 bool MonitorLayoutWidget::isEnabledLayout() const
@@ -377,17 +402,30 @@ QByteArray MonitorLayoutWidget::state() const
 {
   QJsonArray remotes;
   QJsonArray locals;
+  QJsonArray overrides;
   for (const auto &item : m_canvas->items) {
     if (item.local) {
+      const auto native = item.nativeGeometry();
       locals.append(
           QJsonObject{
               {"id", QString::fromStdString(item.id)},
-              {"x", item.rect.x},
-              {"y", item.rect.y},
-              {"width", item.rect.width},
-              {"height", item.rect.height}
+              {"x", native.x},
+              {"y", native.y},
+              {"width", native.width},
+              {"height", native.height}
           }
       );
+      if (item.rect != native) {
+        overrides.append(
+            QJsonObject{
+                {"id", QString::fromStdString(item.id)},
+                {"x", item.rect.x},
+                {"y", item.rect.y},
+                {"width", item.rect.width},
+                {"height", item.rect.height}
+            }
+        );
+      }
     }
     if (!item.local)
       remotes.append(
@@ -401,7 +439,9 @@ QByteArray MonitorLayoutWidget::state() const
       );
   }
   return QJsonDocument(
-             QJsonObject{{"enabled", isEnabledLayout()}, {"remotes", remotes}, {"locals", locals}}
+             QJsonObject{
+                 {"enabled", isEnabledLayout()}, {"remotes", remotes}, {"locals", locals}, {"overrides", overrides}
+             }
   ).toJson(QJsonDocument::Compact);
 }
 
@@ -411,6 +451,19 @@ void MonitorLayoutWidget::reload()
   const QSignalBlocker blocker(m_enabled);
   m_enabled->setChecked(json.value("enabled").toBool());
   auto items = detectDisplays(m_server);
+  for (auto &item : items) {
+    for (const auto &value : json.value("overrides").toArray()) {
+      const auto object = value.toObject();
+      if (object.value("id").toString().toStdString() == item.id) {
+        const MonitorRect rect{
+            object.value("x").toInt(), object.value("y").toInt(), object.value("width").toInt(),
+            object.value("height").toInt()
+        };
+        if (rect.width >= 64 && rect.height >= 64)
+          item.rect = rect;
+      }
+    }
+  }
   for (const auto &value : json.value("remotes").toArray()) {
     const auto object = value.toObject();
     const auto name = object.value("computer").toString();
@@ -425,7 +478,7 @@ void MonitorLayoutWidget::reload()
     );
   }
   m_canvas->items = std::move(items);
-  selectRemote();
+  rebuildDisplays();
   refresh();
   m_original = json.isEmpty() ? state() : QJsonDocument(json).toJson(QJsonDocument::Compact);
 }
@@ -440,38 +493,66 @@ void MonitorLayoutWidget::addRemote()
       return;
   const int width = Settings::value(Settings::Computer::LastWidth.arg(name)).toInt();
   const int height = Settings::value(Settings::Computer::LastHeight.arg(name)).toInt();
-  const auto local = std::find_if(m_canvas->items.begin(), m_canvas->items.end(), [](const auto &item) {
-    return item.local && item.rect.x == 0 && item.rect.y == 0;
-  });
+  auto local =
+      std::find_if(m_canvas->items.begin(), m_canvas->items.end(), [](const auto &item) { return item.local; });
+  if (m_canvas->selected >= 0 && m_canvas->items.at(m_canvas->selected).local)
+    local = m_canvas->items.begin() + m_canvas->selected;
+  const int anchorX = local == m_canvas->items.end() ? 0 : local->rect.x;
+  const int anchorY = local == m_canvas->items.end() ? 0 : local->rect.y;
   const int w = width > 0 ? width : 1920;
   const int h = height > 0 ? height : 1080;
-  m_canvas->items.push_back(
-      {name.toStdString(),
-       name.toStdString(),
-       {local == m_canvas->items.end() ? -w : local->rect.x - w, 0, w, h},
-       false}
-  );
-  selectRemote();
+  m_canvas->items.push_back({name.toStdString(), name.toStdString(), {anchorX - w, anchorY, w, h}, false});
+  rebuildDisplays();
+  m_canvas->selected = static_cast<int>(m_canvas->items.size()) - 1;
   refresh();
   Q_EMIT changed();
 }
 
-void MonitorLayoutWidget::selectRemote()
+void MonitorLayoutWidget::rebuildDisplays()
 {
-  m_canvas->selected = -1;
-  for (size_t i = 0; i < m_canvas->items.size(); ++i) {
-    if (!m_canvas->items[i].local && m_canvas->items[i].computer == m_remote->currentText().toStdString())
-      m_canvas->selected = static_cast<int>(i);
+  const auto previous = m_display->currentData().toString();
+  const QSignalBlocker blocked(m_display);
+  m_display->clear();
+  for (const auto &item : m_canvas->items) {
+    const auto key = QString::fromStdString(item.computer) + "/" + QString::fromStdString(item.id);
+    m_display->addItem(QString::fromStdString(item.computer) + " / " + QString::fromStdString(item.id), key);
   }
+  const int index = m_display->findData(previous);
+  selectDisplay(index >= 0 ? index : (m_display->count() > 0 ? 0 : -1));
+}
+
+void MonitorLayoutWidget::selectDisplay(int index)
+{
+  m_canvas->selected = index;
   refresh();
 }
 
-void MonitorLayoutWidget::resizeRemote()
+void MonitorLayoutWidget::refreshDetectedDisplays(bool resetLayout)
+{
+  auto items = detectDisplays(m_server);
+  if (!resetLayout) {
+    for (auto &item : items) {
+      const auto previous = std::find_if(m_canvas->items.begin(), m_canvas->items.end(), [&](const auto &old) {
+        return old.local && old.id == item.id;
+      });
+      if (previous != m_canvas->items.end() && previous->rect != previous->nativeGeometry())
+        item.rect = previous->rect;
+    }
+  }
+  for (const auto &item : m_canvas->items)
+    if (!item.local)
+      items.push_back(item);
+  setDisplays(std::move(items));
+}
+
+void MonitorLayoutWidget::resizeDisplay()
 {
   if (m_canvas->selected < 0)
     return;
-  auto &r = m_canvas->items.at(m_canvas->selected).rect;
-  r = {m_x->value(), m_y->value(), m_width->value(), m_height->value()};
+  auto &item = m_canvas->items.at(m_canvas->selected);
+  if (item.local && item.nativeRect.width == 0)
+    item.nativeRect = item.rect;
+  item.rect = {m_x->value(), m_y->value(), m_width->value(), m_height->value()};
   refresh();
   Q_EMIT changed();
 }
@@ -494,8 +575,12 @@ void MonitorLayoutWidget::refresh()
     spin->setEnabled(selected);
   if (selected) {
     const auto &item = m_canvas->items.at(m_canvas->selected);
-    const QSignalBlocker blocker(m_remote);
-    m_remote->setCurrentText(QString::fromStdString(item.computer));
+    if (!item.local) {
+      const QSignalBlocker remoteBlocked(m_remote);
+      m_remote->setCurrentText(QString::fromStdString(item.computer));
+    }
+    const QSignalBlocker blocker(m_display);
+    m_display->setCurrentIndex(m_canvas->selected);
     const std::vector<std::pair<QSpinBox *, int>> fields = {
         {m_width, item.rect.width}, {m_height, item.rect.height}, {m_x, item.rect.x}, {m_y, item.rect.y}
     };

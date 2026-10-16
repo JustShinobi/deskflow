@@ -73,4 +73,37 @@ void MonitorLayoutTests::conflictingLocalSelectorsRejected()
   };
   QVERIFY(!planMonitorLayout(items).error.empty());
 }
+void MonitorLayoutTests::manualPositionAndScaleMapToNativeGeometry()
+{
+  const std::vector<DisplayPlacement> items = {
+      {"workstation", "detected-display", {3000, 2000, 800, 450}, true, {0, 0, 1600, 900}},
+      {"remote-machine", "desktop", {2600, 2110, 400, 225}, false}
+  };
+  const auto result = planMonitorLayout(items);
+  QVERIFY2(result.error.empty(), result.error.c_str());
+  QCOMPARE(result.links.size(), size_t(1));
+  QCOMPARE(result.links[0].localStart, 110.0 / 450);
+  QCOMPARE(result.links[0].localEnd, 335.0 / 450);
+  QCOMPARE(result.links[0].remoteStart, 0.0);
+  QCOMPARE(result.links[0].remoteEnd, 1.0);
+  QCOMPARE(items[0].nativeGeometry().width, 1600);
+  QCOMPARE(items[0].nativeGeometry().x, 0);
+}
+void MonitorLayoutTests::manualLayoutPreservesNativeOcclusion()
+{
+  const std::vector<DisplayPlacement> items = {
+      {"desk", "main", {3000, 2000, 800, 450}, true, {0, 0, 1600, 900}},
+      {"desk", "side", {6000, 6000, 100, 225}, true, {-200, 225, 200, 450}},
+      {"other", "desktop", {2600, 2000, 400, 450}, false}
+  };
+  const auto result = planMonitorLayout(items);
+  QVERIFY2(result.error.empty(), result.error.c_str());
+  QCOMPARE(result.links.size(), size_t(2));
+  QCOMPARE(result.links[0].localStart, 0.0);
+  QCOMPARE(result.links[0].localEnd, 0.5);
+  QCOMPARE(result.links[0].remoteEnd, 0.25);
+  QCOMPARE(result.links[1].localStart, 0.5);
+  QCOMPARE(result.links[1].localEnd, 1.0);
+  QCOMPARE(result.links[1].remoteStart, 0.75);
+}
 QTEST_MAIN(MonitorLayoutTests)

@@ -62,9 +62,9 @@ warp echo cannot produce a reverse jump. Enable debug logging to see
 ## Graphical monitor editor (Windows server)
 
 Open Configure Server > Monitors, enable Use monitor layout, select a known
-remote computer and click Add. Local monitors are detected with native Windows
-coordinates and keep the arrangement configured in Windows. Drag the remote
-rectangle until its edges touch local monitors. Green edges indicate
+remote computer and click Add. Local monitors and their resolutions are detected with native Windows
+coordinates. Select or drag any monitor, including local displays, and edit its
+layout width, height, X and Y. Drag rectangles until their edges touch. Green edges indicate
 bidirectional links; X/Y and resolution can also be entered precisely.
 
 The remote desktop size is cached from the existing client information message
@@ -81,8 +81,9 @@ does not save the layout. Disabling the layout returns to the Computers grid.
 
 The layout is stored in `server/monitorLayout`; it contains configurable remote
 rectangles and a local geometry snapshot to detect hardware changes, not a fixed
-physical setup. Local monitors are detected again when
-the dialog opens or Reload displays is clicked. Verify the layout and save again
+physical setup. Manual local placements are stored separately as overrides. Local monitors are detected again when
+the dialog opens or Detect displays is clicked. Detection preserves manual overrides
+for available display IDs. Use detected layout clears local overrides. Verify the layout and save again
 after changing local monitor geometry. Windows GDI names may change after
 reconnecting a display.
 
@@ -91,3 +92,19 @@ warp. This avoids inferring the destination from a one-pixel desktop border,
 which failed when slow or fast motion overshot that border. Return positions are
 restored to the selected monitor even when the incoming depth exceeds the jump
 zone, and are clamped safely inside that monitor.
+
+## Manual local layouts
+
+Detected geometry and manual layout geometry are separate. The editor never
+changes Windows resolution or display arrangement. Layout width/height and X/Y
+control the representation and cross-computer contact ranges; local-to-local
+cursor movement still follows Windows. A manually moved or scaled monitor maps
+its contact ranges proportionally back to its actual exposed native edge.
+Edges occupied by another local monitor in Windows remain local transitions.
+
+No machine names, monitor count, resolutions or positions are fixed in production
+code. Native detection enumerates the active Windows monitors. Remote desktop
+resolution comes from client information when available and can be represented
+with a manually configured layout size. The Computers tab remains available for
+managing machines when monitor layout is enabled; their placement is configured
+in Monitors. Arbitrary external configurations keep the original grid lock.

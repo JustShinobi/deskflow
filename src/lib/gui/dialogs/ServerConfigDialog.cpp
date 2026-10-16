@@ -21,6 +21,7 @@
 
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QLabel>
 #include <QMessageBox>
 #include <QSaveFile>
 #include <QTextStream>
@@ -65,6 +66,18 @@ ServerConfigDialog::ServerConfigDialog(QWidget *parent, ServerConfig &config)
       names.append(computer.name());
     m_monitorLayout->setComputerNames(names);
   });
+  auto *layoutHint = new QLabel(
+      tr("When monitor layout is enabled, manage computers here and configure their display placement in Monitors."),
+      this
+  );
+  layoutHint->setWordWrap(true);
+  ui->tabComputers->layout()->addWidget(layoutHint);
+  layoutHint->setVisible(m_monitorLayout->isEnabledLayout());
+  connect(m_monitorLayout, &MonitorLayoutWidget::changed, this, [this, layoutHint] {
+    toggleExternalConfig(ui->groupExternalConfig->isChecked());
+    layoutHint->setVisible(m_monitorLayout->isEnabledLayout());
+  });
+  toggleExternalConfig(ui->groupExternalConfig->isChecked());
   setButtonBoxEnabledButtons();
 
   ui->lblRemoveComputer->setPixmap(QIcon::fromTheme("user-trash").pixmap(QSize(64, 64)));
@@ -75,6 +88,7 @@ ServerConfigDialog::ServerConfigDialog(QWidget *parent, ServerConfig &config)
   if (!deskflow::platform::isWindows())
     ui->cbWin32KeepForeground->setVisible(false);
   initConnections();
+  updateControls();
 }
 
 ServerConfigDialog::~ServerConfigDialog() = default;
@@ -423,7 +437,7 @@ void ServerConfigDialog::onComputerRemoved()
 void ServerConfigDialog::toggleExternalConfig(bool checked)
 {
   ui->widgetExternalConfigControls->setEnabled(checked);
-  ui->tabWidget->setTabEnabled(0, !checked);
+  ui->tabWidget->setTabEnabled(0, !checked || (m_monitorLayout && m_monitorLayout->isEnabledLayout()));
   ui->tabWidget->setTabEnabled(1, !checked);
   serverConfig().setUseExternalConfig(checked);
   setButtonBoxEnabledButtons();

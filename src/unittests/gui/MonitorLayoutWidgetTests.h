@@ -15,6 +15,7 @@ private Q_SLOTS:
   void generatedLinksAndPersistence();
   void canvasDraggingAndRendering();
   void dialogSaveAndCancel();
+  void localDisplaysAreEditableAndPersisted();
 
 private:
   QTemporaryDir m_temp;

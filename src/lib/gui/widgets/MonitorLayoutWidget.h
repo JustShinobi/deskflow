@@ -37,14 +37,17 @@ Q_SIGNALS:
 private:
   QByteArray state() const;
   void refresh();
-  void selectRemote();
-  void resizeRemote();
+  void rebuildDisplays();
+  void selectDisplay(int index);
+  void refreshDetectedDisplays(bool resetLayout);
+  void resizeDisplay();
   void addRemote();
   QString m_server;
   QByteArray m_original;
   MonitorLayoutCanvas *m_canvas;
   QCheckBox *m_enabled;
   QComboBox *m_remote;
+  QComboBox *m_display;
   QSpinBox *m_width;
   QSpinBox *m_height;
   QSpinBox *m_x;
