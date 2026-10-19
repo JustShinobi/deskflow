@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+# SPDX-License-Identifier: MIT
+
+name: Monitor layout CodeQL review
+on:
+  push:
+    branches: [ci/monitor-layout-review]
+    paths: ['.github/workflows/codeql-review.yml']
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    container: debian:trixie-slim
+    timeout-minutes: 25
+    steps:
+      - name: Install container dependencies
+        run: apt-get update -qq && apt-get install -y git
+      - uses: actions/checkout@v6
+        with:
+          ref: 132aeceebfa1606b474170ad3fbbc8f2d441b38e
+      - uses: ./.github/actions/install-dependencies
+        with:
+          like: debian
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: cpp
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4
+        with:
+          output: codeql-results
+          ref: refs/heads/feat/monitor-layout-upstream
+          sha: 132aeceebfa1606b474170ad3fbbc8f2d441b38e
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: monitor-layout-codeql-sarif
+          path: codeql-results/*.sarif

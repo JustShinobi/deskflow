@@ -6,6 +6,8 @@ name: Monitor layout upstream preparation
 on:
   push:
     branches: [ci/monitor-layout-review]
+    paths: ['src/**']
+  workflow_dispatch:
 
 permissions:
   contents: read
