@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2025 Deskflow Developers.
  * SPDX-FileCopyrightText: (C) 2012 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
@@ -395,7 +396,7 @@ int32_t Server::getJumpZoneSize(const BaseClientProxy *client) const
   }
 }
 
-void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool forScreensaver)
+void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool forScreensaver, Direction exitDirection)
 {
   assert(dst != nullptr);
 
@@ -489,6 +490,9 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
     // increment enter sequence number
     ++m_seqNum;
 
+    if (m_active == m_primaryClient) {
+      m_primaryClient->setEntryDirection(oppositeDirection(exitDirection));
+    }
     // enter new computer
     m_active->enter(x, y, m_seqNum, m_primaryClient->getToggleMask(), forScreensaver);
 
@@ -1283,7 +1287,7 @@ void Server::handleSwitchWaitTimeout()
   }
 
   // switch computer
-  switchComputer(m_switchComputer, m_switchWaitX, m_switchWaitY, false);
+  switchComputer(m_switchComputer, m_switchWaitX, m_switchWaitY, false, m_switchDir);
 }
 
 void Server::handleClientDisconnected(BaseClientProxy *client)
@@ -1697,7 +1701,7 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
     // should we switch or not?
     if (isSwitchOkay(newComputer, dir, x, y, xc, yc)) {
       // switch computer
-      switchComputer(newComputer, x, y, false);
+      switchComputer(newComputer, x, y, false, dir);
       return true;
     }
   }
@@ -1766,6 +1770,7 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
 
   // find direction of neighbor and get the neighbor
   bool jump = true;
+  Direction exitDirection = Direction::NoDirection;
   BaseClientProxy *newComputer;
   do {
     // clamp position to computer
@@ -1835,6 +1840,7 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
     }
 
     // try to switch computer.  get the neighbor.
+    exitDirection = dir;
     newComputer = mapToNeighbor(m_active, dir, m_x, m_y);
 
     // see if we should switch
@@ -1849,7 +1855,7 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
     int32_t newY = m_y;
 
     // switch computers
-    switchComputer(newComputer, newX, newY, false);
+    switchComputer(newComputer, newX, newY, false, exitDirection);
   } else {
     // same computer.  clamp mouse to edge.
     m_x = xOld + dx;

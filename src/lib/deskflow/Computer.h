@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -7,6 +8,7 @@
 
 #pragma once
 
+#include "base/DirectionTypes.h"
 #include "deskflow/ClipboardTypes.h"
 #include "deskflow/IComputer.h"
 #include "deskflow/KeyTypes.h"
@@ -83,6 +85,9 @@ public:
   returning.
   */
   void warpCursor(int32_t x, int32_t y);
+
+  //! Forward the edge selected by the server's transition route.
+  void setEntryDirection(Direction direction);
 
   //! Set clipboard
   /*!

@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -7,6 +8,7 @@
 
 #pragma once
 
+#include "base/DirectionTypes.h"
 #include "server/BaseClientProxy.h"
 
 namespace deskflow {
@@ -36,6 +38,9 @@ public:
   Handles reconfiguration of jump zones.
   */
   virtual void reconfigure(uint32_t activeSides);
+
+  //! Select the primary monitor edge used by the next transition.
+  void setEntryDirection(Direction direction);
 
   //! Register a system hotkey
   /*!

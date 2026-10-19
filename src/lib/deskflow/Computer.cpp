@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2003 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -202,6 +203,11 @@ void Computer::warpCursor(int32_t x, int32_t y)
 {
   assert(m_isPrimary);
   m_computer->warpCursor(x, y);
+}
+
+void Computer::setEntryDirection(Direction direction)
+{
+  m_computer->setEntryDirection(direction);
 }
 
 void Computer::setClipboard(ClipboardID id, const IClipboard *clipboard)

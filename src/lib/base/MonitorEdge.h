@@ -41,7 +41,10 @@ public:
   bool project(int32_t &x, int32_t &y, int32_t zoneSize) const;
 
   //! Restore an incoming desktop point to an exposed part of the monitor.
-  bool restore(int32_t &x, int32_t &y, int32_t zoneSize) const;
+  bool restore(int32_t &x, int32_t &y, int32_t zoneSize, bool explicitEntry = false) const;
+
+  //! Exposed edge intervals in local desktop coordinates.
+  const std::vector<std::pair<int32_t, int32_t>> &segments() const;
 
 private:
   bool vertical() const;

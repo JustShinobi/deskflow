@@ -156,13 +156,18 @@ bool MonitorEdge::project(int32_t &x, int32_t &y, int32_t zoneSize) const
   return false;
 }
 
-bool MonitorEdge::restore(int32_t &x, int32_t &y, int32_t zoneSize) const
+const std::vector<std::pair<int32_t, int32_t>> &MonitorEdge::segments() const
+{
+  return m_segments;
+}
+
+bool MonitorEdge::restore(int32_t &x, int32_t &y, int32_t zoneSize, bool explicitEntry) const
 {
   if (empty() || zoneSize <= 0) {
     return false;
   }
   const int32_t depth = ((vertical() ? x : y) - desktopBoundary()) * inwardSign();
-  if (depth < 0 || depth > zoneSize) {
+  if (!explicitEntry && (depth < 0 || depth > zoneSize)) {
     return false;
   }
   const int32_t span = vertical() ? m_desktop.height : m_desktop.width;
@@ -174,7 +179,10 @@ bool MonitorEdge::restore(int32_t &x, int32_t &y, int32_t zoneSize) const
   for (const auto &[begin, end] : m_segments) {
     if (offset < end - begin) {
       const int32_t extent = vertical() ? m_monitor.width : m_monitor.height;
-      const int32_t inset = std::min(zoneSize + 1, (extent - 1) / 2);
+      if (extent <= 2 * zoneSize + 1) {
+        return false;
+      }
+      const int32_t inset = zoneSize + 1;
       if (vertical()) {
         x = monitorBoundary() + inwardSign() * inset;
         y = begin + offset;

@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -23,6 +24,11 @@ PrimaryClient::PrimaryClient(const std::string &name, deskflow::Computer *comput
 void PrimaryClient::reconfigure(uint32_t activeSides)
 {
   m_computer->reconfigure(activeSides);
+}
+
+void PrimaryClient::setEntryDirection(Direction direction)
+{
+  m_computer->setEntryDirection(direction);
 }
 
 uint32_t PrimaryClient::registerHotKey(KeyID key, KeyModifierMask mask)

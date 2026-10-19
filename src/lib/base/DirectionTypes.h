@@ -1,6 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
- * SPDX-FileCopyrightText: (C) 2025 Deskflow Developers
+ * SPDX-FileCopyrightText: (C) 2025 - 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -46,3 +46,19 @@ enum class DirectionMask
   TopMask = 1 << static_cast<int>(Direction::Top),      ///< Top edge mask
   BottomMask = 1 << static_cast<int>(Direction::Bottom) ///< Bottom edge mask
 };
+
+constexpr Direction oppositeDirection(Direction direction)
+{
+  switch (direction) {
+  case Direction::Left:
+    return Direction::Right;
+  case Direction::Right:
+    return Direction::Left;
+  case Direction::Top:
+    return Direction::Bottom;
+  case Direction::Bottom:
+    return Direction::Top;
+  default:
+    return Direction::NoDirection;
+  }
+}

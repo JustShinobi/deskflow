@@ -87,6 +87,7 @@ public:
   void reconfigure(uint32_t activeSides) override;
   uint32_t activeSides() override;
   void warpCursor(int32_t x, int32_t y) override;
+  void setEntryDirection(Direction direction) override;
   uint32_t registerHotKey(KeyID key, KeyModifierMask mask) override;
   void unregisterHotKey(uint32_t id) override;
   void fakeInputBegin() override;
@@ -282,6 +283,7 @@ private:
   int32_t m_xCursor = 0;
   int32_t m_yCursor = 0;
   deskflow::CursorMotion m_remoteMotion;
+  Direction m_entryDirection = Direction::NoDirection;
 
   // last clipboard
   uint32_t m_sequenceNumber = 0;
