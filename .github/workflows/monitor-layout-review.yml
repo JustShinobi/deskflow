@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+# SPDX-License-Identifier: MIT
+
+name: Monitor layout upstream preparation
+
+on:
+  push:
+    branches: [ci/monitor-layout-review]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [59b6d5405ec4f10256a6f76e46e5fcb6c67cadff, 8c388fe1d01798dabe2c9cb7281fc20e89059e2f, 34ee283ab94375f750666c093987d9384ce35a18, 132aeceebfa1606b474170ad3fbbc8f2d441b38e]
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.revision }}
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: amd64
+          spectre: true
+      - name: Install dependencies
+        id: deps
+        uses: ./.github/actions/install-dependencies
+        with:
+          qt-version: '6.12'
+          vcpkg-triplet: x64-windows-release
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${{ steps.deps.outputs.vcpkg-cmake-config }}
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MONITOR_LAYOUT_SCREENSHOT: ${{ github.workspace }}/monitor-layout-editor.png
+        run: ctest --test-dir build/src/unittests --output-on-failure --timeout 180
+      - uses: actions/upload-artifact@v7
+        if: matrix.revision == '132aeceebfa1606b474170ad3fbbc8f2d441b38e'
+        with:
+          name: monitor-layout-editor-preview
+          path: monitor-layout-editor.png
+      - name: Package portable binaries
+        if: matrix.revision == '132aeceebfa1606b474170ad3fbbc8f2d441b38e'
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE build/bin/LICENSE
+          Copy-Item -Recurse LICENSES build/bin/LICENSES
+          Copy-Item docs/dev/monitor-edge-switching.md build/bin/monitor-edge-switching.md
+          Compress-Archive -Path build/bin/* -DestinationPath deskflow-monitor-edge-windows-x64.zip
+      - uses: actions/upload-artifact@v7
+        if: matrix.revision == '132aeceebfa1606b474170ad3fbbc8f2d441b38e'
+        with:
+          name: deskflow-monitor-edge-windows-x64
+          path: deskflow-monitor-edge-windows-x64.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-test-logs-${{ matrix.revision }}
+          path: build/src/unittests/Testing/Temporary/*.log
+
+  quality:
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [59b6d5405ec4f10256a6f76e46e5fcb6c67cadff, 8c388fe1d01798dabe2c9cb7281fc20e89059e2f, 34ee283ab94375f750666c093987d9384ce35a18, 132aeceebfa1606b474170ad3fbbc8f2d441b38e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.revision }}
+      - name: Install checkers
+        run: pipx install clang-format==20.1.0 && pipx install reuse
+      - name: Format
+        run: git diff --name-only 52f92f784c8ef00fc7865a4797a2c48afdadedd0...HEAD | grep -E '\.(cpp|h)$' | xargs -r clang-format --dry-run --Werror
+      - name: Licenses
+        run: reuse lint
+
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [59b6d5405ec4f10256a6f76e46e5fcb6c67cadff, 8c388fe1d01798dabe2c9cb7281fc20e89059e2f, 34ee283ab94375f750666c093987d9384ce35a18, 132aeceebfa1606b474170ad3fbbc8f2d441b38e]
+        platform: [linux, macos]
+        include:
+          - platform: macos
+            os: macos-15
+            container: ''
+            like: ''
+          - platform: linux
+            os: ubuntu-latest
+            container: debian:testing-slim
+            like: debian
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 35
+    steps:
+      - name: Install Git
+        if: matrix.container != ''
+        run: apt-get update -qq && apt-get install -y git
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.revision }}
+          fetch-depth: 0
+      - uses: ./.github/actions/install-dependencies
+        with:
+          qt-version: '6.12'
+          like: ${{ matrix.like }}
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - name: Build
+        run: cmake --build build -j 4
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure --timeout 180
