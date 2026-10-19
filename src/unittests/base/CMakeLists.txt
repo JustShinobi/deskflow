@@ -68,3 +68,11 @@ create_test(
   SOURCE EventQueueTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
 )
+
+create_test(
+  NAME MonitorLayoutTests
+  DEPENDS base
+  LIBS arch ${extra_libs}
+  SOURCE MonitorLayoutTests.cpp
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
+)

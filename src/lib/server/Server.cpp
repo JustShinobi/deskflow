@@ -11,6 +11,7 @@
 
 #include "base/IEventQueue.h"
 #include "base/Log.h"
+#include "common/Settings.h"
 #include "deskflow/AppUtil.h"
 #include "deskflow/Computer.h"
 #include "deskflow/DeskflowException.h"
@@ -1135,6 +1136,20 @@ void Server::processOptions()
   m_protocol = Settings::networkProtocol();
 }
 
+void Server::cacheRemoteShape(BaseClientProxy *pClient) const
+{
+  if (pClient == m_primaryClient || !Settings::isWritable())
+    return;
+  int32_t x, y, width, height;
+  pClient->getShape(x, y, width, height);
+  if (width <= 0 || height <= 0)
+    return;
+  const auto name = QString::fromStdString(getName(pClient));
+  Settings::setValue(Settings::Computer::LastWidth.arg(name), width);
+  Settings::setValue(Settings::Computer::LastHeight.arg(name), height);
+  Settings::save(false);
+}
+
 void Server::handleShapeChanged(BaseClientProxy *client)
 {
   if (!m_clientSet.contains(client)) {
@@ -1142,6 +1157,7 @@ void Server::handleShapeChanged(BaseClientProxy *client)
   }
 
   LOG_DEBUG("computer \"%s\" shape changed", getName(client).c_str());
+  cacheRemoteShape(client);
 
   // update jump coordinate
   int32_t x;
@@ -1913,6 +1929,8 @@ bool Server::addClient(BaseClientProxy *client)
   // add to list
   m_clientSet.insert(client);
   m_clients.try_emplace(name, client);
+
+  cacheRemoteShape(client);
 
   // initialize client data
   int32_t x;

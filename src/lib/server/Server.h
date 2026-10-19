@@ -308,6 +308,7 @@ private:
 
   // event handlers
   void handleShapeChanged(BaseClientProxy *client);
+  void cacheRemoteShape(BaseClientProxy *pClient) const;
   void handleClipboardGrabbed(const Event &event, BaseClientProxy *client);
   void handleClipboardChanged(const Event &event, BaseClientProxy *client);
   void handleKeyDownEvent(const Event &event);

@@ -119,6 +119,7 @@ public:
     inline static const auto RelativeMouseMoves = QStringLiteral("server/relativeMouseMoves");
     inline static const auto SwitchDelay = QStringLiteral("server/switchDelay");
     inline static const auto SwitchDoubleTap = QStringLiteral("server/switchDoubleTap");
+    inline static const auto MonitorLayout = QStringLiteral("server/monitorLayout");
     inline static const auto SwitchMonitorLeft = QStringLiteral("server/switchMonitorLeft");
     inline static const auto SwitchMonitorRight = QStringLiteral("server/switchMonitorRight");
     inline static const auto SwitchMonitorTop = QStringLiteral("server/switchMonitorTop");
@@ -130,6 +131,8 @@ public:
 
   struct Computer
   {
+    inline static const auto LastWidth = QStringLiteral("computer_%1/lastWidth");
+    inline static const auto LastHeight = QStringLiteral("computer_%1/lastHeight");
     inline static const auto Aliases = QStringLiteral("computer_%1/aliases");
     inline static const auto Name = QStringLiteral("computer_%1/name");
     inline static const auto HalfDuplexCapsLock = QStringLiteral("computer_%1/halfDuplexCapsLock");
@@ -339,6 +342,7 @@ private:
     , Server::RelativeMouseMoves
     , Server::SwitchDelay
     , Server::SwitchDoubleTap
+    , Server::MonitorLayout
     , Server::SwitchMonitorLeft
     , Server::SwitchMonitorRight
     , Server::SwitchMonitorTop

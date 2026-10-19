@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2025 - 2026 Chris Rizzitello <sithlord48@gmail.com>
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2008 Volker Lanz <vl@fidra.de>
@@ -16,14 +17,54 @@
 #include "dialogs/ActionDialog.h"
 #include "dialogs/ComputerSettingsDialog.h"
 #include "dialogs/HotkeyDialog.h"
+#include "gui/widgets/MonitorLayoutWidget.h"
 #include "gui/widgets/SettingsDialogButtonBox.h"
 
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QLabel>
 #include <QMessageBox>
+#include <QSaveFile>
+#include <QTextStream>
+#include <optional>
 
 using enum ComputerConfig::SwitchCorner;
 
-ServerConfigDialog::ServerConfigDialog(QWidget *parent, ServerConfig &config)
+namespace {
+QString monitorConfigPath()
+{
+  return QFileInfo(Settings::settingsFile()).absolutePath() + "/monitor-layout.conf";
+}
+
+std::optional<QString> withoutLinks(const QString &config)
+{
+  QStringList retained;
+  bool inLinks = false;
+  for (const auto &line : config.split('\n')) {
+    const auto content = line.section('#', 0, 0).simplified();
+    if (content == "section: links") {
+      if (inLinks)
+        return std::nullopt;
+      inLinks = true;
+    } else if (inLinks) {
+      if (content.startsWith("section:"))
+        return std::nullopt;
+      if (content == "end")
+        inLinks = false;
+    } else {
+      retained.append(line);
+    }
+  }
+  if (inLinks)
+    return std::nullopt;
+  return retained.join('\n');
+}
+
+} // namespace
+
+ServerConfigDialog::ServerConfigDialog(
+    QWidget *parent, ServerConfig &config, deskflow::gui::MonitorLayoutWidget::DisplayDetector detector
+)
     : QDialog(parent, Qt::WindowTitleHint | Qt::WindowSystemMenuHint),
       ui{std::make_unique<Ui::ServerConfigDialog>()},
       m_columns{Settings::value(Settings::Server::GridWidth).toInt()},
@@ -40,6 +81,37 @@ ServerConfigDialog::ServerConfigDialog(QWidget *parent, ServerConfig &config)
   layout()->addWidget(m_buttonBox);
 
   loadFromConfig();
+  QStringList names;
+  for (const auto &computer : m_serverConfig.computers())
+    names.append(computer.name());
+  m_widgetMonitorLayout =
+      new deskflow::gui::MonitorLayoutWidget(m_serverConfig.getServerName(), names, this, std::move(detector));
+  ui->tabWidget->addTab(m_widgetMonitorLayout, tr("Monitors"));
+  connect(
+      m_widgetMonitorLayout, &deskflow::gui::MonitorLayoutWidget::changed, this,
+      &ServerConfigDialog::setButtonBoxEnabledButtons
+  );
+  if (m_widgetMonitorLayout->isEnabledLayout())
+    ui->tabWidget->setCurrentWidget(m_widgetMonitorLayout);
+  connect(&m_computerSetupModel, &ComputerSetupModel::computersChanged, this, [this] {
+    QStringList names;
+    for (const auto &computer : m_serverConfig.computers())
+      names.append(computer.name());
+    m_widgetMonitorLayout->setComputerNames(names);
+  });
+  auto *lblLayoutHint = new QLabel(
+      tr("When monitor layout is enabled, manage computers here and configure their display placement in Monitors."),
+      this
+  );
+  lblLayoutHint->setWordWrap(true);
+  ui->tabComputers->layout()->addWidget(lblLayoutHint);
+  lblLayoutHint->setVisible(m_widgetMonitorLayout->isEnabledLayout());
+  connect(m_widgetMonitorLayout, &deskflow::gui::MonitorLayoutWidget::changed, this, [this, lblLayoutHint] {
+    toggleExternalConfig(ui->groupExternalConfig->isChecked());
+    lblLayoutHint->setVisible(m_widgetMonitorLayout->isEnabledLayout());
+  });
+  toggleExternalConfig(ui->groupExternalConfig->isChecked());
+  setButtonBoxEnabledButtons();
 
   ui->lblRemoveComputer->setPixmap(QIcon::fromTheme("user-trash").pixmap(QSize(64, 64)));
   ui->lblNewComputer->setEnabled(!model().isFull());
@@ -49,6 +121,7 @@ ServerConfigDialog::ServerConfigDialog(QWidget *parent, ServerConfig &config)
   if (!deskflow::platform::isWindows())
     ui->cbWin32KeepForeground->setVisible(false);
   initConnections();
+  updateControls();
 }
 
 ServerConfigDialog::~ServerConfigDialog() = default;
@@ -60,6 +133,49 @@ bool ServerConfigDialog::addClient(const QString &clientName)
 
 void ServerConfigDialog::save()
 {
+  if (m_widgetMonitorLayout->isEnabledLayout()) {
+    const auto error = m_widgetMonitorLayout->validationError();
+    if (!error.isEmpty()) {
+      QMessageBox::warning(this, tr("Monitor layout"), error);
+      ui->tabWidget->setCurrentWidget(m_widgetMonitorLayout);
+      return;
+    }
+    QString existing;
+    if (ui->groupExternalConfig->isChecked()) {
+      QFile input(ui->lineConfigFile->text());
+      if (!input.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(
+            this, tr("Monitor layout"), tr("Could not read the existing configuration to preserve its options.")
+        );
+        return;
+      }
+      existing = QString::fromUtf8(input.readAll());
+    } else {
+      QTextStream stream(&existing);
+      stream << m_serverConfig;
+    }
+    const auto retained = withoutLinks(existing);
+    if (!retained) {
+      QMessageBox::warning(
+          this, tr("Monitor layout"), tr("The existing links section is incomplete. Correct it before saving.")
+      );
+      return;
+    }
+    const auto data = (m_widgetMonitorLayout->linksConfig() + *retained).toUtf8();
+    const auto path = monitorConfigPath();
+    QSaveFile output(path);
+    if (!output.open(QIODevice::WriteOnly) || output.write(data) != data.size() || !output.commit()) {
+      QMessageBox::warning(
+          this, tr("Monitor layout"), tr("Could not save the monitor configuration: %1").arg(output.errorString())
+      );
+      return;
+    }
+    ui->lineConfigFile->setText(path);
+    ui->groupExternalConfig->setChecked(true);
+  } else if (m_widgetMonitorLayout->isModified() && ui->lineConfigFile->text() == monitorConfigPath()) {
+    ui->groupExternalConfig->setChecked(false);
+  }
+
   if (ui->groupExternalConfig->isChecked() && !QFile::exists(ui->lineConfigFile->text())) {
 
     auto selectedButton = QMessageBox::warning(
@@ -103,6 +219,7 @@ void ServerConfigDialog::save()
     Settings::setValue(Settings::Computer::Aliases.arg(computerName), computer.aliases());
     Settings::setValue(Settings::Computer::Name.arg(computerName), computerName);
   }
+  m_widgetMonitorLayout->commit();
   Settings::removeUnknownComputers(computerNames);
   QDialog::accept();
 }
@@ -359,7 +476,7 @@ void ServerConfigDialog::onComputerRemoved()
 void ServerConfigDialog::toggleExternalConfig(bool checked)
 {
   ui->widgetExternalConfigControls->setEnabled(checked);
-  ui->tabWidget->setTabEnabled(0, !checked);
+  ui->tabWidget->setTabEnabled(0, !checked || (m_widgetMonitorLayout && m_widgetMonitorLayout->isEnabledLayout()));
   ui->tabWidget->setTabEnabled(1, !checked);
   serverConfig().setUseExternalConfig(checked);
   setButtonBoxEnabledButtons();
@@ -430,6 +547,8 @@ void ServerConfigDialog::resetFromSettings()
   m_serverConfig = m_originalServerConfig;
   m_serverConfig.setConfigFile(m_originalServerConfigUsesExternalFile);
   m_serverConfig.setUseExternalConfig(m_originalServerConfigIsExternal);
+  if (m_widgetMonitorLayout)
+    m_widgetMonitorLayout->reload();
   loadFromConfig();
   if (ui->tabWidget->currentWidget() == ui->tabComputers) {
     ui->computerSetupView->reset();
@@ -522,6 +641,8 @@ void ServerConfigDialog::initConnections() const
 void ServerConfigDialog::updateControls() const
 {
   const bool writable = Settings::isWritable();
+  if (m_widgetMonitorLayout)
+    m_widgetMonitorLayout->setEnabled(writable && deskflow::platform::isWindows());
   ui->cbDefaultLockToComputerState->setEnabled(writable);
   ui->cbDisableLockToComputer->setEnabled(writable);
   ui->cbEnableClipboard->setEnabled(writable);
@@ -590,7 +711,8 @@ bool ServerConfigDialog::addComputer(const QString &clientName, bool doSilent)
 
 bool ServerConfigDialog::isGeneralConfigModified() const
 {
-  return m_originalServerConfigIsExternal != Settings::value(Settings::Server::ExternalConfig).toBool() ||
+  return (m_widgetMonitorLayout && m_widgetMonitorLayout->isModified()) ||
+         m_originalServerConfigIsExternal != Settings::value(Settings::Server::ExternalConfig).toBool() ||
          m_originalServerConfigUsesExternalFile != Settings::value(Settings::Server::ExternalConfigFile).toString() ||
          m_protocol != Settings::networkProtocol() ||
          m_enableClipboard != Settings::value(Settings::Server::EnableClipboard).toBool() ||
