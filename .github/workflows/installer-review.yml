@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+# SPDX-License-Identifier: MIT
+name: Monitor layout Windows installer
+on:
+  push:
+    branches: [ci/monitor-layout-review]
+    paths: ['.github/workflows/installer-review.yml']
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 132aeceebfa1606b474170ad3fbbc8f2d441b38e
+          fetch-depth: 0
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: amd64
+          spectre: true
+      - uses: ./.github/actions/install-dependencies
+        id: deps
+        with:
+          qt-version: '6.12'
+          vcpkg-triplet: x64-windows-release
+      - name: Configure installer
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=ON -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DPACKAGE_VERSION_LABEL=1.27.0.17-monitor-layout-r5 ${{ steps.deps.outputs.vcpkg-cmake-config }}
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure --timeout 180
+      - name: Package MSI
+        run: cpack --config build/CPackConfig.cmake -G WIX -B build
+      - name: Record installer integrity and payload
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory installer-review -Force | Out-Null
+          $msi = Get-ChildItem build -Filter '*.msi' | Select-Object -First 1
+          if (!$msi) { throw 'MSI was not generated' }
+          $payload = @{}
+          foreach ($name in @('deskflow.exe','deskflow-core.exe','deskflow-daemon.exe')) {
+            $payload[$name] = (Get-FileHash (Join-Path 'build/bin' $name) -Algorithm SHA256).Hash
+          }
+          $info = @{
+            sourceCommit = '132aeceebfa1606b474170ad3fbbc8f2d441b38e'
+            msiName = $msi.Name
+            msiSha256 = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+            binarySha256 = $payload
+            installationExecuted = $false
+          }
+          $info | ConvertTo-Json -Depth 5 | Set-Content installer-review/buildinfo.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deskflow-monitor-layout-r5-installer
+          path: |
+            build/*.msi
+            installer-review/*.json
+            build/src/unittests/Testing/Temporary/*.log
+            build/_CPack_Packages/win64/WIX/*.log
+          if-no-files-found: error
