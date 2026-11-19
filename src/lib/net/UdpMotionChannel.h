@@ -48,6 +48,7 @@ public:
   struct DecodedPacket
   {
     PacketType type = PacketType::Ping;
+    uint8_t flags = 0;
     uint16_t enterSeq = 0;
     uint32_t clientId = 0;
     uint32_t pktSeq = 0;
@@ -89,7 +90,7 @@ public:
   static uint64_t computeMac(const uint8_t header[kHeaderSize], const SessionKey &key);
   static void encodePacket(
       PacketType type, uint16_t enterSeq, uint32_t clientId, uint32_t pktSeq, int16_t x, int16_t y,
-      const SessionKey &key, uint8_t out[kPacketSize]
+      const SessionKey &key, uint8_t out[kPacketSize], uint8_t flags = 0
   );
   static bool verifyAndDecode(const uint8_t *buf, size_t len, const SessionKey &key, DecodedPacket &out);
   static bool peekClientId(const uint8_t *buf, size_t len, uint32_t &clientIdOut);
@@ -129,13 +130,14 @@ private:
     uint16_t cumRelY = 0;
     uint16_t lastRelEnterSeq = 0;
     bool hasRelEnterSeq = false;
+    bool bidirectionalReady = false;
     bool loggedReady = false;
   };
 
   ISocketMultiplexerJob *serviceSocket(ISocketMultiplexerJob *job, bool read, bool write, bool error);
   ISocketMultiplexerJob *newReadJob();
   void handleServerDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr);
-  void handleClientDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr);
+  void handleClientDatagram(const uint8_t *buf, size_t len);
   void armClientPingTimer();
   void disarmClientPingTimer();
 
@@ -156,8 +158,6 @@ private:
   uint32_t m_clientId = 0;
   SessionKey m_clientKey{};
   ArchNetAddress m_serverPeerAddr = nullptr;
-  std::string m_expectedServerIp;
-  uint16_t m_expectedServerPort = 0;
   uint32_t m_clientPingSeq = 0;
   EventQueueTimer *m_pingTimer = nullptr;
   std::atomic<bool> m_clientAcked{false};

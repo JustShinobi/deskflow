@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "net/UdpMotionChannel.h"
 
 #include "arch/Arch.h"
 #include "arch/ArchException.h"
+#include "base/BaseException.h"
 #include "base/Event.h"
 #include "base/IEventQueue.h"
 #include "base/Log.h"
@@ -22,6 +27,8 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <string_view>
 
 namespace {
 
@@ -29,6 +36,7 @@ constexpr uint8_t kMagic0 = 'D';
 constexpr uint8_t kMagic1 = 'F';
 constexpr uint8_t kMagic2 = 'U';
 constexpr uint8_t kMagic3 = '1';
+constexpr uint8_t kFlagAckReceived = 0x01;
 constexpr double kPeerActiveTimeoutSeconds = 8.0;
 constexpr double kClientPingIntervalSeconds = 2.0;
 constexpr size_t kMaxDatagramsPerPoll = 64;
@@ -138,9 +146,9 @@ int16_t clampInt16(int32_t v)
 int32_t saturatingAddInt32(int32_t a, int32_t b)
 {
   const int64_t sum = static_cast<int64_t>(a) + static_cast<int64_t>(b);
-  return static_cast<int32_t>(
-      std::clamp<int64_t>(sum, std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max())
-  );
+  const int64_t lo = static_cast<int64_t>((std::numeric_limits<int32_t>::min)());
+  const int64_t hi = static_cast<int64_t>((std::numeric_limits<int32_t>::max)());
+  return static_cast<int32_t>(std::clamp<int64_t>(sum, lo, hi));
 }
 
 std::string normalizeIpString(std::string ip)
@@ -155,10 +163,11 @@ std::string normalizeIpString(std::string ip)
   return ip;
 }
 
-uint64_t
-computePayloadKeystream(uint8_t rawType, uint32_t clientId, uint32_t pktSeq, const UdpMotionChannel::SessionKey &key)
+uint64_t computePayloadKeystream(
+    uint8_t rawType, uint8_t flags, uint32_t clientId, uint32_t pktSeq, const UdpMotionChannel::SessionKey &key
+)
 {
-  // Domain-separated subkey for Encrypt-then-MAC keystream generation over (type, clientId, pktSeq)
+  // Domain-separated subkey for Encrypt-then-MAC keystream generation over (type, flags, clientId, pktSeq)
   const UdpMotionChannel::SessionKey encKey = {
       key[0] ^ 0x656e6331U, key[1] ^ 0x7374726dU, key[2] ^ 0x6d61736bU, key[3] ^ 0xdf01df01U
   };
@@ -168,6 +177,7 @@ computePayloadKeystream(uint8_t rawType, uint32_t clientId, uint32_t pktSeq, con
   nonceBlock[2] = kMagic2;
   nonceBlock[3] = kMagic3;
   nonceBlock[4] = rawType;
+  nonceBlock[5] = flags;
   writeBE32(nonceBlock + 8, clientId);
   writeBE32(nonceBlock + 12, pktSeq);
   return UdpMotionChannel::computeMac(nonceBlock, encKey);
@@ -207,7 +217,7 @@ void UdpMotionChannel::close()
     m_socket = nullptr;
     try {
       ARCH->closeSocket(sock);
-    } catch (const ArchNetworkException &e) {
+    } catch (const std::runtime_error &e) {
       LOG_WARN("error closing UDP fast-path socket: %s", e.what());
     }
   }
@@ -291,11 +301,11 @@ uint64_t UdpMotionChannel::computeMac(const uint8_t header[kHeaderSize], const S
 
 void UdpMotionChannel::encodePacket(
     PacketType type, uint16_t enterSeq, uint32_t clientId, uint32_t pktSeq, int16_t x, int16_t y, const SessionKey &key,
-    uint8_t out[kPacketSize]
+    uint8_t out[kPacketSize], uint8_t flags
 )
 {
   const uint8_t rawType = static_cast<uint8_t>(type);
-  const uint64_t ks = computePayloadKeystream(rawType, clientId, pktSeq, key);
+  const uint64_t ks = computePayloadKeystream(rawType, flags, clientId, pktSeq, key);
   const uint16_t maskedEnter = static_cast<uint16_t>(enterSeq ^ static_cast<uint16_t>(ks & 0xffffULL));
   const uint16_t maskedX =
       static_cast<uint16_t>(static_cast<uint16_t>(x) ^ static_cast<uint16_t>((ks >> 16) & 0xffffULL));
@@ -307,7 +317,7 @@ void UdpMotionChannel::encodePacket(
   out[2] = kMagic2;
   out[3] = kMagic3;
   out[4] = rawType;
-  out[5] = 0;
+  out[5] = flags;
   writeBE16(out + 6, maskedEnter);
   writeBE32(out + 8, clientId);
   writeBE32(out + 12, pktSeq);
@@ -339,6 +349,7 @@ bool UdpMotionChannel::verifyAndDecode(const uint8_t *buf, size_t len, const Ses
   }
 
   const uint8_t rawType = buf[4];
+  const uint8_t flags = buf[5];
   if (rawType < static_cast<uint8_t>(PacketType::Ping) || rawType > static_cast<uint8_t>(PacketType::MouseWheel)) {
     return false;
   }
@@ -355,8 +366,9 @@ bool UdpMotionChannel::verifyAndDecode(const uint8_t *buf, size_t len, const Ses
     return false;
   }
 
-  const uint64_t ks = computePayloadKeystream(rawType, cid, pktSeq, key);
+  const uint64_t ks = computePayloadKeystream(rawType, flags, cid, pktSeq, key);
   out.type = static_cast<PacketType>(rawType);
+  out.flags = flags;
   out.enterSeq = static_cast<uint16_t>(readBE16(buf + 6) ^ static_cast<uint16_t>(ks & 0xffffULL));
   out.clientId = cid;
   out.pktSeq = pktSeq;
@@ -394,11 +406,11 @@ bool UdpMotionChannel::openServer(const NetworkAddress &listenAddr)
     m_multiplexer->addSocket(this, newReadJob());
     LOG_INFO("UDP motion fast-path listening on port %u", m_boundPort);
     return true;
-  } catch (const BaseException &e) {
+  } catch (const std::runtime_error &e) {
     if (sock != nullptr) {
       try {
         ARCH->closeSocket(sock);
-      } catch (const BaseException &) {
+      } catch (const std::runtime_error &) {
         // ignore close failure on error path
       }
     }
@@ -412,8 +424,6 @@ UdpMotionChannel::registerClient(const void *clientHandle, const std::string &ex
 {
   std::scoped_lock lock{m_mutex};
 
-  // Always rotate clientId + key + sequence state on re-registration (e.g. Server::setConfig reload)
-  // so the client's fresh UDP socket and reset Ping counter re-handshake immediately without nonce reuse.
   if (const auto existing = m_handleToId.find(clientHandle); existing != m_handleToId.end()) {
     const uint32_t oldId = existing->second;
     m_handleToId.erase(existing);
@@ -472,7 +482,7 @@ bool UdpMotionChannel::isClientActive(const void *clientHandle) const
     return false;
   }
   const auto peerIt = m_peersById.find(it->second);
-  if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr) {
+  if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr || !peerIt->second.bidirectionalReady) {
     return false;
   }
   return (Arch::time() - peerIt->second.lastHeardTime) <= kPeerActiveTimeoutSeconds;
@@ -493,7 +503,7 @@ bool UdpMotionChannel::sendMouseAbs(const void *clientHandle, uint16_t enterSeq,
       return false;
     }
     auto peerIt = m_peersById.find(it->second);
-    if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr) {
+    if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr || !peerIt->second.bidirectionalReady) {
       return false;
     }
     ServerPeer &peer = peerIt->second;
@@ -509,7 +519,7 @@ bool UdpMotionChannel::sendMouseAbs(const void *clientHandle, uint16_t enterSeq,
   bool sent = false;
   try {
     sent = (ARCH->writeDatagram(sock, packet, sizeof(packet), dest) == sizeof(packet));
-  } catch (const BaseException &) {
+  } catch (const std::runtime_error &) {
     sent = false;
   }
   ARCH->closeAddr(dest);
@@ -531,7 +541,7 @@ bool UdpMotionChannel::sendMouseRel(const void *clientHandle, uint16_t enterSeq,
       return false;
     }
     auto peerIt = m_peersById.find(it->second);
-    if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr) {
+    if (peerIt == m_peersById.end() || peerIt->second.peerAddr == nullptr || !peerIt->second.bidirectionalReady) {
       return false;
     }
     ServerPeer &peer = peerIt->second;
@@ -558,7 +568,7 @@ bool UdpMotionChannel::sendMouseRel(const void *clientHandle, uint16_t enterSeq,
   bool sent = false;
   try {
     sent = (ARCH->writeDatagram(sock, packet, sizeof(packet), dest) == sizeof(packet));
-  } catch (const BaseException &) {
+  } catch (const std::runtime_error &) {
     sent = false;
   }
   ARCH->closeAddr(dest);
@@ -590,7 +600,6 @@ bool UdpMotionChannel::openClient(
     ArchNetAddress peer = ARCH->copyAddr(serverAddr.getAddress());
     ARCH->setAddrPort(peer, udpPort);
     ARCH->setLowLatencyOnSocket(sock, peer);
-    std::string expectedServerIp = normalizeIpString(ARCH->addrToString(peer));
 
     {
       std::scoped_lock lock{m_mutex};
@@ -599,8 +608,6 @@ bool UdpMotionChannel::openClient(
       m_clientId = clientId;
       m_clientKey = key;
       m_serverPeerAddr = peer;
-      m_expectedServerIp = std::move(expectedServerIp);
-      m_expectedServerPort = udpPort;
       m_clientPingSeq = 0;
       m_lastRxAbsSeq = 0;
       m_lastRxRelSeq = 0;
@@ -615,7 +622,7 @@ bool UdpMotionChannel::openClient(
     sendClientPing();
     armClientPingTimer();
     return true;
-  } catch (const BaseException &e) {
+  } catch (const std::runtime_error &e) {
     LOG_WARN("could not open client UDP fast-path socket (staying on TCP): %s", e.what());
     return false;
   }
@@ -632,14 +639,15 @@ void UdpMotionChannel::sendClientPing()
       return;
     }
     const uint32_t seq = nextNonZeroSeq(m_clientPingSeq);
-    encodePacket(PacketType::Ping, 0, m_clientId, seq, 0, 0, m_clientKey, packet);
+    const uint8_t flags = m_clientAcked.load(std::memory_order_acquire) ? kFlagAckReceived : 0;
+    encodePacket(PacketType::Ping, 0, m_clientId, seq, 0, 0, m_clientKey, packet, flags);
     sock = m_socket;
     peer = ARCH->copyAddr(m_serverPeerAddr);
   }
 
   try {
     ARCH->writeDatagram(sock, packet, sizeof(packet), peer);
-  } catch (const BaseException &) {
+  } catch (const std::runtime_error &) {
     // non-fatal; periodic timer will retry
   }
   ARCH->closeAddr(peer);
@@ -707,8 +715,8 @@ ISocketMultiplexerJob *UdpMotionChannel::serviceSocket(ISocketMultiplexerJob *jo
     ArchNetAddress fromAddr = nullptr;
     size_t n = 0;
     try {
-      n = ARCH->readDatagram(sock, buf, sizeof(buf), &fromAddr);
-    } catch (const BaseException &) {
+      n = ARCH->readDatagram(sock, buf, sizeof(buf), isServer ? &fromAddr : nullptr);
+    } catch (const std::runtime_error &) {
       if (fromAddr != nullptr) {
         ARCH->closeAddr(fromAddr);
       }
@@ -724,11 +732,11 @@ ISocketMultiplexerJob *UdpMotionChannel::serviceSocket(ISocketMultiplexerJob *jo
 
     if (isServer) {
       handleServerDatagram(buf, n, fromAddr);
+      if (fromAddr != nullptr) {
+        ARCH->closeAddr(fromAddr);
+      }
     } else {
-      handleClientDatagram(buf, n, fromAddr);
-    }
-    if (fromAddr != nullptr) {
-      ARCH->closeAddr(fromAddr);
+      handleClientDatagram(buf, n);
     }
   }
 
@@ -774,6 +782,9 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
     }
     peer.lastRxPingSeq = pkt.pktSeq;
     peer.lastHeardTime = Arch::time();
+    if ((pkt.flags & kFlagAckReceived) != 0) {
+      peer.bidirectionalReady = true;
+    }
 
     if (peer.peerAddr == nullptr || !ARCH->isEqualAddr(peer.peerAddr, fromAddr)) {
       if (peer.peerAddr != nullptr) {
@@ -782,7 +793,7 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
       peer.peerAddr = ARCH->copyAddr(fromAddr);
       configureQos = true;
     }
-    if (!peer.loggedReady) {
+    if (peer.bidirectionalReady && !peer.loggedReady) {
       peer.loggedReady = true;
       LOG_INFO("UDP motion fast-path active for clientId=%u (%s:%d)", cid, senderIp.c_str(), senderPort);
     }
@@ -802,7 +813,7 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
     }
     try {
       ARCH->writeDatagram(sock, ackPacket, sizeof(ackPacket), replyAddr);
-    } catch (const BaseException &) {
+    } catch (const std::runtime_error &) {
       // ignore transient error
     }
   }
@@ -811,23 +822,12 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
   }
 }
 
-void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr)
+void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len)
 {
-  if (fromAddr == nullptr) {
-    return;
-  }
-
-  const std::string senderIp = normalizeIpString(ARCH->addrToString(fromAddr));
-  const int senderPort = ARCH->getAddrPort(fromAddr);
-
   bool shouldNotify = false;
+  bool sendConfirmPing = false;
   {
     std::scoped_lock lock{m_mutex};
-    if (senderPort != static_cast<int>(m_expectedServerPort) ||
-        (!m_expectedServerIp.empty() && senderIp != m_expectedServerIp)) {
-      return;
-    }
-
     DecodedPacket pkt{};
     if (!verifyAndDecode(buf, len, m_clientKey, pkt) || pkt.clientId != m_clientId) {
       return;
@@ -843,6 +843,7 @@ void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len, Arch
       }
       if (!m_clientAcked.exchange(true, std::memory_order_release)) {
         LOG_INFO("UDP motion fast-path connected to server");
+        sendConfirmPing = true;
       }
       break;
 
@@ -885,6 +886,11 @@ void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len, Arch
     default:
       break;
     }
+  }
+
+  if (sendConfirmPing) {
+    // Immediately confirm Server->Client reachability so Server unlocks UDP transmission in <1 RTT.
+    sendClientPing();
   }
 
   if (shouldNotify && m_events != nullptr) {

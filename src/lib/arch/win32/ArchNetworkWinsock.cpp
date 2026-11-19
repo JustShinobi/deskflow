@@ -740,9 +740,17 @@ void ArchNetworkWinsock::setLowLatencyOnSocket(ArchSocket s, ArchNetAddress peer
       s_qosAddSocketToFlow(s_qosHandle, s->m_socket, dest, kQosTrafficTypeAudioVideo, kQosNonAdaptiveFlow, &flowId);
     }
     if (flowId != 0) {
+      DWORD evictedFlow = 0;
       {
         std::scoped_lock lock{m_mutex};
+        if (s->m_qosFlowIds.size() >= 32) {
+          evictedFlow = s->m_qosFlowIds.front();
+          s->m_qosFlowIds.erase(s->m_qosFlowIds.begin());
+        }
         s->m_qosFlowIds.push_back(flowId);
+      }
+      if (evictedFlow != 0 && s_qosRemoveSocketFromFlow != nullptr) {
+        s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, evictedFlow, 0);
       }
       if (s_qosSetFlow != nullptr) {
         DWORD dscp = kDscpExpeditedForwarding;

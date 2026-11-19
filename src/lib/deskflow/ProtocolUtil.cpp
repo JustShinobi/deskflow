@@ -15,6 +15,8 @@
 #include <iterator>
 
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 //
@@ -156,10 +158,21 @@ void ProtocolUtil::writef(deskflow::IStream *stream, const char *fmt, ...)
 
   va_list args;
   va_start(args, fmt);
-  auto size = getLength(fmt, args);
+  uint32_t size = 0;
+  try {
+    size = getLength(fmt, args);
+  } catch (...) {
+    va_end(args);
+    throw;
+  }
   va_end(args);
   va_start(args, fmt);
-  vwritef(stream, fmt, size, args);
+  try {
+    vwritef(stream, fmt, size, args);
+  } catch (...) {
+    va_end(args);
+    throw;
+  }
   va_end(args);
 }
 
@@ -378,14 +391,16 @@ uint32_t ProtocolUtil::getLength(const char *fmt, va_list args)
         assert(0 && "invalid format specifier");
       }
 
-      if (fieldLen > PROTOCOL_MAX_MESSAGE_LENGTH || total > PROTOCOL_MAX_MESSAGE_LENGTH - fieldLen) {
-        throw IOException();
+      static constexpr size_t kMaxFrameSize = (std::numeric_limits<uint32_t>::max)() - 4U;
+      if (fieldLen > kMaxFrameSize || total > kMaxFrameSize - fieldLen) {
+        throw std::length_error("protocol message length overflow");
       }
       total += fieldLen;
       ++fmt;
     } else {
-      if (total >= PROTOCOL_MAX_MESSAGE_LENGTH) {
-        throw IOException();
+      static constexpr size_t kMaxFrameSize = (std::numeric_limits<uint32_t>::max)() - 4U;
+      if (total >= kMaxFrameSize) {
+        throw std::length_error("protocol message length overflow");
       }
       ++total;
       ++fmt;
@@ -398,7 +413,13 @@ void ProtocolUtil::writef(std::vector<uint8_t> &buffer, const char *fmt, va_list
 {
   va_list copy;
   va_copy(copy, args);
-  const uint32_t size = getLength(fmt, copy);
+  uint32_t size = 0;
+  try {
+    size = getLength(fmt, copy);
+  } catch (...) {
+    va_end(copy);
+    throw;
+  }
   va_end(copy);
   const size_t offset = buffer.size();
   buffer.resize(offset + size);

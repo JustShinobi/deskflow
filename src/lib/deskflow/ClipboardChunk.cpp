@@ -10,6 +10,7 @@
 #include "deskflow/ProtocolTypes.h"
 #include "deskflow/ProtocolUtil.h"
 #include "io/IStream.h"
+#include <algorithm>
 #include <cstring>
 #include <limits>
 
@@ -148,7 +149,12 @@ TransferState ClipboardChunk::assemble(
       return Error;
     }
 
-    dataCached.append(data);
+    try {
+      dataCached.append(data);
+    } catch (const std::bad_alloc &) {
+      reset();
+      return Error;
+    }
     return TransferState::InProgress;
   } else if (mark == ChunkType::DataEnd) {
     if (!state.active) {
