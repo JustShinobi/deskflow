@@ -14,6 +14,9 @@
 #include "mt/Mutex.h"
 #include "net/IDataSocket.h"
 
+#include <string>
+#include <utility>
+
 class Mutex;
 class Thread;
 class ISocketMultiplexerJob;
@@ -54,6 +57,14 @@ public:
   bool isFatal() const override;
   uint32_t getSize() const override;
   uint32_t getOutputSize() const override;
+  std::string getPeerAddressString() const override
+  {
+    return m_peerAddress;
+  }
+  void setPeerAddressString(std::string peer)
+  {
+    m_peerAddress = std::move(peer);
+  }
 
   // IDataSocket overrides
   void connect(const NetworkAddress &) override;
@@ -148,4 +159,5 @@ private:
   IEventQueue *m_events;
   CondVar<bool> m_flushed;
   SocketMultiplexer *m_socketMultiplexer;
+  std::string m_peerAddress;
 };

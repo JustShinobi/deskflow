@@ -107,7 +107,7 @@ void ClipboardPacer::pump()
         // Emit one empty DataChunk before DataEnd to match StreamChunker's wire sequence.
         ProtocolUtil::writef(
             m_stream, "DCLP%1i%4i%1i%S", cur.id, cur.sequence, static_cast<uint8_t>(ChunkType::DataChunk), uint32_t{0},
-            nullptr
+            static_cast<const uint8_t *>(nullptr)
         );
       }
       continue;
@@ -128,7 +128,7 @@ void ClipboardPacer::pump()
       cur.finished = true;
       ProtocolUtil::writef(
           m_stream, "DCLP%1i%4i%1i%S", cur.id, cur.sequence, static_cast<uint8_t>(ChunkType::DataEnd), uint32_t{0},
-          nullptr
+          static_cast<const uint8_t *>(nullptr)
       );
       LOG_DEBUG("sent clipboard size=%zu", cur.payload.size());
     }

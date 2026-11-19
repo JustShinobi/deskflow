@@ -366,6 +366,7 @@ void ServerProxy::handleKeepAliveAlarm()
 
 void ServerProxy::requestDisconnect(const char *message)
 {
+  m_clipboardPacer.cancelAll();
   m_events->addEvent(Event(
       EventTypes::ClientDisconnectRequested, m_stream->getEventTarget(),
       new Client::DisconnectRequest(Client::DisconnectRequest::Kind::Disconnect, message)
@@ -374,6 +375,7 @@ void ServerProxy::requestDisconnect(const char *message)
 
 void ServerProxy::requestRefuseConnection(deskflow::core::ConnectionRefusal reason, const char *message)
 {
+  m_clipboardPacer.cancelAll();
   m_events->addEvent(Event(
       EventTypes::ClientDisconnectRequested, m_stream->getEventTarget(), new Client::DisconnectRequest(reason, message)
   ));

@@ -33,6 +33,12 @@ ClientProxy1_6::~ClientProxy1_6()
   m_events->removeHandler(EventTypes::ClipboardSending, this);
 }
 
+void ClientProxy1_6::removeHeartbeatTimer()
+{
+  m_clipboardPacer.cancelAll();
+  ClientProxy1_5::removeHeartbeatTimer();
+}
+
 void ClientProxy1_6::setClipboard(ClipboardID id, const IClipboard *clipboard)
 {
   // ignore if this clipboard is already clean

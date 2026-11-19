@@ -16,17 +16,18 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <string>
 
 class EventQueueTimer;
 class IEventQueue;
 class ISocketMultiplexerJob;
 class SocketMultiplexer;
 
-//! Authenticated low-latency UDP side-channel for real-time mouse motion.
+//! Authenticated & encrypted low-latency UDP side-channel for real-time mouse motion.
 /*!
 Eliminates TCP Head-of-Line blocking over lossy/congested Wi-Fi by carrying
 idempotent absolute cursor coordinates and cumulative relative deltas in
-28-byte SipHash-2-4 authenticated datagrams tagged for WMM voice/video QoS.
+28-byte Encrypt-then-MAC (SipHash-2-4 stream + MAC) datagrams tagged for WMM QoS.
 */
 class UdpMotionChannel : public ISocket
 {
@@ -83,8 +84,8 @@ public:
   void close() override;
   void *getEventTarget() const override;
 
-  // Pure packet & MAC helpers (exposed for deterministic unit tests)
-  static SessionKey generateSessionKey();
+  // Pure packet & crypto helpers (exposed for deterministic unit tests)
+  static bool generateSessionKey(SessionKey &out);
   static uint64_t computeMac(const uint8_t header[kHeaderSize], const SessionKey &key);
   static void encodePacket(
       PacketType type, uint16_t enterSeq, uint32_t clientId, uint32_t pktSeq, int16_t x, int16_t y,
@@ -99,7 +100,7 @@ public:
   {
     return m_boundPort;
   }
-  ClientRegistration registerClient(const void *clientHandle);
+  ClientRegistration registerClient(const void *clientHandle, const std::string &expectedPeerIp = {});
   void unregisterClient(const void *clientHandle);
   bool isClientActive(const void *clientHandle) const;
   bool sendMouseAbs(const void *clientHandle, uint16_t enterSeq, int32_t x, int32_t y);
@@ -119,19 +120,22 @@ private:
   {
     uint32_t clientId = 0;
     SessionKey key{};
+    std::string expectedIp;
     ArchNetAddress peerAddr = nullptr;
     double lastHeardTime = 0.0;
     uint32_t lastRxPingSeq = 0;
     uint32_t txSeq = 0;
     uint16_t cumRelX = 0;
     uint16_t cumRelY = 0;
+    uint16_t lastRelEnterSeq = 0;
+    bool hasRelEnterSeq = false;
     bool loggedReady = false;
   };
 
   ISocketMultiplexerJob *serviceSocket(ISocketMultiplexerJob *job, bool read, bool write, bool error);
   ISocketMultiplexerJob *newReadJob();
   void handleServerDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr);
-  void handleClientDatagram(const uint8_t *buf, size_t len);
+  void handleClientDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr);
   void armClientPingTimer();
   void disarmClientPingTimer();
 
@@ -152,12 +156,15 @@ private:
   uint32_t m_clientId = 0;
   SessionKey m_clientKey{};
   ArchNetAddress m_serverPeerAddr = nullptr;
+  std::string m_expectedServerIp;
+  uint16_t m_expectedServerPort = 0;
   uint32_t m_clientPingSeq = 0;
   EventQueueTimer *m_pingTimer = nullptr;
   std::atomic<bool> m_clientAcked{false};
 
   uint32_t m_lastRxAbsSeq = 0;
   uint32_t m_lastRxRelSeq = 0;
+  uint16_t m_rxRelEnterSeq = 0;
   int16_t m_rxCumRelX = 0;
   int16_t m_rxCumRelY = 0;
   bool m_hasRelBaseline = false;

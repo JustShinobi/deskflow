@@ -118,7 +118,13 @@ TransferState ClipboardChunk::assemble(
       return Oversize;
     }
 
-    dataCached.reserve(state.expectedSize);
+    try {
+      static constexpr size_t kMaxInitialReserve = 4U * 1024U * 1024U;
+      dataCached.reserve(std::min<size_t>(state.expectedSize, kMaxInitialReserve));
+    } catch (const std::bad_alloc &) {
+      reset();
+      return Error;
+    }
     LOG_DEBUG("start receiving clipboard data, expected size=%zu", state.expectedSize);
     return Started;
   } else if (mark == ChunkType::DataChunk) {

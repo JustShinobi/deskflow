@@ -27,6 +27,7 @@ void PacketStreamFilter::close()
 {
   std::scoped_lock lock{m_mutex};
   m_size = 0;
+  m_formatError = false;
   m_buffer.pop(m_buffer.getSize());
   StreamFilter::close();
 }
@@ -69,6 +70,11 @@ uint32_t PacketStreamFilter::read(void *buffer, uint32_t n)
 
 void PacketStreamFilter::write(const void *buffer, uint32_t count)
 {
+  if (count > PROTOCOL_MAX_MESSAGE_LENGTH) {
+    m_events->addEvent(Event(EventTypes::StreamOutputError, getEventTarget()));
+    return;
+  }
+
   // Emit the 4-byte big-endian length prefix and payload in a single write()
   // so TCP_NODELAY / SecureSocket never split one message across two segments
   // or two TLS records and SocketMultiplexer wakes only once.
@@ -122,6 +128,9 @@ bool PacketStreamFilter::isReadyNoLock() const
 bool PacketStreamFilter::readPacketSize()
 {
   // note -- m_mutex must be locked on entry
+  if (m_formatError) {
+    return false;
+  }
 
   if (m_size == 0 && m_buffer.getSize() >= 4) {
     uint8_t buffer[4];
@@ -130,6 +139,9 @@ bool PacketStreamFilter::readPacketSize()
     m_size =
         ((uint32_t)buffer[0] << 24) | ((uint32_t)buffer[1] << 16) | ((uint32_t)buffer[2] << 8) | (uint32_t)buffer[3];
     if (m_size > PROTOCOL_MAX_MESSAGE_LENGTH) {
+      m_size = 0;
+      m_formatError = true;
+      m_buffer.pop(m_buffer.getSize());
       m_events->addEvent(Event(EventTypes::StreamInputFormatError, getEventTarget()));
       return false;
     }
@@ -139,6 +151,10 @@ bool PacketStreamFilter::readPacketSize()
 
 bool PacketStreamFilter::readMore()
 {
+  if (m_formatError) {
+    return false;
+  }
+
   // note if we have whole packet
   bool wasReady = isReadyNoLock();
 

@@ -367,6 +367,9 @@ size_t ArchNetworkBSD::writeSocket(ArchSocket s, const void *buf, size_t len)
 size_t ArchNetworkBSD::readDatagram(ArchSocket s, void *buf, size_t len, ArchNetAddress *fromAddr)
 {
   assert(s != nullptr);
+  if (fromAddr != nullptr) {
+    *fromAddr = nullptr;
+  }
 
   sockaddr_storage storage{};
   auto fromLen = static_cast<socklen_t>(sizeof(storage));

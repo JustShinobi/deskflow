@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 class IEventQueue;
 
@@ -106,6 +107,12 @@ public:
   virtual uint32_t getOutputSize() const
   {
     return 0;
+  }
+
+  //! Remote peer IP string if backed by a network socket, else empty
+  virtual std::string getPeerAddressString() const
+  {
+    return {};
   }
 
   //@}

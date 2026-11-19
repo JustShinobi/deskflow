@@ -45,6 +45,7 @@ public:
   bool isReady() const override;
   uint32_t getSize() const override;
   uint32_t getOutputSize() const override;
+  std::string getPeerAddressString() const override;
 
   //! Get the stream
   /*!

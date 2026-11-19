@@ -48,9 +48,10 @@ uint8_t *writeIntToPtr(uint32_t value, uint32_t length, uint8_t *dst)
 
 template <typename T> uint8_t *writeVectorIntToPtr(const std::vector<T> *vectorData, uint8_t *dst)
 {
+  const uint32_t count = (vectorData != nullptr) ? static_cast<uint32_t>(vectorData->size()) : 0;
+  dst = writeIntToPtr(count, sizeof(uint32_t), dst);
   if (vectorData != nullptr) {
     const std::vector<T> &vec = *vectorData;
-    dst = writeIntToPtr(static_cast<uint32_t>(vec.size()), sizeof(uint32_t), dst);
     for (size_t i = 0; i < vec.size(); ++i) {
       dst = writeIntToPtr(vec[i], sizeof(T), dst);
     }
@@ -119,10 +120,13 @@ void writeFormattedBytes(uint8_t *dst, const char *fmt, va_list args)
       case 'S': {
         assert(len == 0);
         const uint32_t byteLen = va_arg(args, uint32_t);
-        const uint8_t *src = va_arg(args, uint8_t *);
+        const uint8_t *src = va_arg(args, const uint8_t *);
         dst = writeIntToPtr(byteLen, sizeof(byteLen), dst);
-        if (byteLen != 0) {
+        if (byteLen != 0 && src != nullptr) {
           std::memcpy(dst, src, byteLen);
+          dst += byteLen;
+        } else if (byteLen != 0) {
+          std::memset(dst, 0, byteLen);
           dst += byteLen;
         }
         break;
@@ -310,68 +314,84 @@ void ProtocolUtil::vreadf(deskflow::IStream *stream, const char *fmt, va_list ar
 
 uint32_t ProtocolUtil::getLength(const char *fmt, va_list args)
 {
-  uint32_t n = 0;
+  size_t total = 0;
   while (*fmt) {
     if (*fmt == '%') {
       // format specifier.  determine argument size.
       ++fmt;
-      auto len = eatLength(&fmt);
+      size_t fieldLen = eatLength(&fmt);
       switch (*fmt) {
       case 'i':
-        assert(len == 1 || len == 2 || len == 4);
+        assert(fieldLen == 1 || fieldLen == 2 || fieldLen == 4);
         (void)va_arg(args, uint32_t);
         break;
 
       case 'I':
-        assert(len == 1 || len == 2 || len == 4);
-        switch (len) {
-        case 1:
-          len = (uint32_t)(va_arg(args, std::vector<uint8_t> *))->size() + 4;
+        assert(fieldLen == 1 || fieldLen == 2 || fieldLen == 4);
+        switch (fieldLen) {
+        case 1: {
+          const auto *list = va_arg(args, const std::vector<uint8_t> *);
+          fieldLen = ((list != nullptr) ? list->size() : 0) + 4;
           break;
+        }
 
-        case 2:
-          len = 2 * (uint32_t)(va_arg(args, std::vector<uint16_t> *))->size() + 4;
+        case 2: {
+          const auto *list = va_arg(args, const std::vector<uint16_t> *);
+          fieldLen = 2 * ((list != nullptr) ? list->size() : 0) + 4;
           break;
+        }
 
-        case 4:
-          len = 4 * (uint32_t)(va_arg(args, std::vector<uint32_t> *))->size() + 4;
+        case 4: {
+          const auto *list = va_arg(args, const std::vector<uint32_t> *);
+          fieldLen = 4 * ((list != nullptr) ? list->size() : 0) + 4;
           break;
+        }
 
         default:
-          LOG_ERR("format specifier %%I%d has invalid length", len);
+          LOG_ERR("format specifier %%I%zu has invalid length", fieldLen);
+          fieldLen = 0;
           break;
         }
         break;
 
-      case 's':
-        assert(len == 0);
-        len = (uint32_t)(va_arg(args, std::string *))->size() + 4;
+      case 's': {
+        assert(fieldLen == 0);
+        const auto *src = va_arg(args, const std::string *);
+        fieldLen = ((src != nullptr) ? src->size() : 0) + 4;
         break;
+      }
 
-      case 'S':
-        assert(len == 0);
-        len = va_arg(args, uint32_t) + 4;
+      case 'S': {
+        assert(fieldLen == 0);
+        const uint32_t rawLen = va_arg(args, uint32_t);
+        (void)va_arg(args, const uint8_t *);
+        fieldLen = static_cast<size_t>(rawLen) + 4;
         break;
+      }
 
       case '%':
-        assert(len == 0);
-        len = 1;
+        assert(fieldLen == 0);
+        fieldLen = 1;
         break;
 
       default:
         assert(0 && "invalid format specifier");
       }
 
-      // accumulate size
-      n += len;
+      if (fieldLen > PROTOCOL_MAX_MESSAGE_LENGTH || total > PROTOCOL_MAX_MESSAGE_LENGTH - fieldLen) {
+        throw IOException();
+      }
+      total += fieldLen;
       ++fmt;
     } else {
-      // regular character
-      ++n;
+      if (total >= PROTOCOL_MAX_MESSAGE_LENGTH) {
+        throw IOException();
+      }
+      ++total;
       ++fmt;
     }
   }
-  return n;
+  return static_cast<uint32_t>(total);
 }
 
 void ProtocolUtil::writef(std::vector<uint8_t> &buffer, const char *fmt, va_list args)

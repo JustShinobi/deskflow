@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 
 //
 // StreamBuffer
@@ -59,7 +61,12 @@ void StreamBuffer::write(const void *vdata, uint32_t n)
     return;
   }
 
-  if (m_head > 0 && m_data.size() + n > m_data.capacity()) {
+  if (n > std::numeric_limits<uint32_t>::max() - m_size) {
+    throw std::length_error("StreamBuffer size overflow");
+  }
+
+  if (m_head > 0 &&
+      (n > m_data.capacity() - m_data.size() || n > std::numeric_limits<uint32_t>::max() - m_data.size())) {
     std::memmove(m_data.data(), m_data.data() + m_head, m_size);
     m_data.resize(m_size);
     m_head = 0;
@@ -67,7 +74,8 @@ void StreamBuffer::write(const void *vdata, uint32_t n)
 
   const size_t required = m_data.size() + static_cast<size_t>(n);
   if (required > m_data.capacity()) {
-    const size_t doubled = m_data.capacity() * 2;
+    const size_t maxCap = std::numeric_limits<size_t>::max() / 2;
+    const size_t doubled = (m_data.capacity() <= maxCap) ? (m_data.capacity() * 2) : required;
     m_data.reserve(std::max({kInitialCapacity, doubled, required}));
   }
 

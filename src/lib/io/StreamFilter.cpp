@@ -81,6 +81,11 @@ uint32_t StreamFilter::getOutputSize() const
   return getStream()->getOutputSize();
 }
 
+std::string StreamFilter::getPeerAddressString() const
+{
+  return getStream()->getPeerAddressString();
+}
+
 deskflow::IStream *StreamFilter::getStream() const
 {
   return m_stream;

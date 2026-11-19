@@ -332,9 +332,13 @@ void ArchNetworkWinsock::closeSocket(ArchSocket s)
 
   // close the socket if necessary
   if (doClose) {
-    if (s->m_qosFlowId != 0 && s_qosHandle != nullptr && s_qosRemoveSocketFromFlow != nullptr) {
-      s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, s->m_qosFlowId, 0);
-      s->m_qosFlowId = 0;
+    if (s_qosHandle != nullptr && s_qosRemoveSocketFromFlow != nullptr) {
+      for (DWORD flowId : s->m_qosFlowIds) {
+        if (flowId != 0) {
+          s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, flowId, 0);
+        }
+      }
+      s->m_qosFlowIds.clear();
     }
     if (close_winsock(s->m_socket) == SOCKET_ERROR) {
       // close failed.  restore the last ref and throw.
@@ -664,29 +668,36 @@ size_t ArchNetworkWinsock::writeSocket(ArchSocket s, const void *buf, size_t len
 size_t ArchNetworkWinsock::readDatagram(ArchSocket s, void *buf, size_t len, ArchNetAddress *fromAddr)
 {
   assert(s != nullptr);
-
-  sockaddr_storage storage{};
-  int fromLen = sizeof(storage);
-  int n = recvfrom_winsock(
-      s->m_socket, buf, static_cast<int>(len), 0, reinterpret_cast<struct sockaddr *>(&storage), &fromLen
-  );
-  if (n == SOCKET_ERROR) {
-    if (fromAddr != nullptr) {
-      *fromAddr = nullptr;
-    }
-    const int err = getsockerror_winsock();
-    if (err == WSAEINTR || err == WSAEWOULDBLOCK || err == WSAECONNRESET || err == WSAEMSGSIZE) {
-      return 0;
-    }
-    throwError(err);
+  if (fromAddr != nullptr) {
+    *fromAddr = nullptr;
   }
 
-  if (fromAddr != nullptr && fromLen > 0) {
-    ArchNetAddress addr = ArchNetAddressImpl::alloc(static_cast<size_t>(fromLen));
-    memcpy(&addr->m_addr, &storage, static_cast<size_t>(fromLen));
-    *fromAddr = addr;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    sockaddr_storage storage{};
+    int fromLen = sizeof(storage);
+    int n = recvfrom_winsock(
+        s->m_socket, buf, static_cast<int>(len), 0, reinterpret_cast<struct sockaddr *>(&storage), &fromLen
+    );
+    if (n == SOCKET_ERROR) {
+      const int err = getsockerror_winsock();
+      if (err == WSAEMSGSIZE || err == WSAECONNRESET) {
+        // Oversized datagram or ICMP reset already popped from Winsock queue; advance to next packet.
+        continue;
+      }
+      if (err == WSAEINTR || err == WSAEWOULDBLOCK) {
+        return 0;
+      }
+      throwError(err);
+    }
+
+    if (fromAddr != nullptr && fromLen > 0) {
+      ArchNetAddress addr = ArchNetAddressImpl::alloc(static_cast<size_t>(fromLen));
+      memcpy(&addr->m_addr, &storage, static_cast<size_t>(fromLen));
+      *fromAddr = addr;
+    }
+    return static_cast<size_t>(n);
   }
-  return static_cast<size_t>(n);
+  return 0;
 }
 
 size_t ArchNetworkWinsock::writeDatagram(ArchSocket s, const void *buf, size_t len, ArchNetAddress toAddr)
@@ -723,18 +734,16 @@ void ArchNetworkWinsock::setLowLatencyOnSocket(ArchSocket s, ArchNetAddress peer
   // Windows 10/11 NDIS + 802.11 WMM (AC_VO / AC_VI) hardware queue tagging via qWave
   std::call_once(s_qosInitFlag, initQwaveOnce);
   if (s_qosHandle != nullptr && s_qosAddSocketToFlow != nullptr) {
-    if (s->m_qosFlowId != 0 && s_qosRemoveSocketFromFlow != nullptr) {
-      s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, s->m_qosFlowId, 0);
-      s->m_qosFlowId = 0;
-    }
-
     PSOCKADDR dest = (peer != nullptr) ? TYPED_ADDR(struct sockaddr, peer) : nullptr;
     DWORD flowId = 0;
     if (!s_qosAddSocketToFlow(s_qosHandle, s->m_socket, dest, kQosTrafficTypeVoice, kQosNonAdaptiveFlow, &flowId)) {
       s_qosAddSocketToFlow(s_qosHandle, s->m_socket, dest, kQosTrafficTypeAudioVideo, kQosNonAdaptiveFlow, &flowId);
     }
     if (flowId != 0) {
-      s->m_qosFlowId = flowId;
+      {
+        std::scoped_lock lock{m_mutex};
+        s->m_qosFlowIds.push_back(flowId);
+      }
       if (s_qosSetFlow != nullptr) {
         DWORD dscp = kDscpExpeditedForwarding;
         s_qosSetFlow(s_qosHandle, flowId, kQosSetOutgoingDscpValue, sizeof(dscp), &dscp, 0, nullptr);

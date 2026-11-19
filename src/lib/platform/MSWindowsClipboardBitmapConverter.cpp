@@ -67,10 +67,20 @@ UINT MSWindowsClipboardBitmapConverter::getWin32Format() const
 HANDLE
 MSWindowsClipboardBitmapConverter::fromIClipboard(const std::string &data) const
 {
+  if (data.size() < sizeof(BITMAPINFOHEADER)) {
+    return nullptr;
+  }
+
   std::string normalisedData;
   const auto *clipboardData = &data;
   if (normaliseMalformedMacDib(data, normalisedData)) {
     clipboardData = &normalisedData;
+  }
+
+  const auto *hdr = reinterpret_cast<const BITMAPINFOHEADER *>(clipboardData->data());
+  if (hdr->biSize < sizeof(BITMAPINFOHEADER) || hdr->biSize > clipboardData->size() || hdr->biWidth <= 0 ||
+      hdr->biHeight == 0) {
+    return nullptr;
   }
 
   // copy to memory handle
@@ -97,65 +107,132 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
   if (src == nullptr) {
     return std::string();
   }
-  uint32_t srcSize = static_cast<uint32_t>(GlobalSize(data));
+  const size_t srcSize = static_cast<size_t>(GlobalSize(data));
   if (srcSize < sizeof(BITMAPINFOHEADER)) {
     GlobalUnlock(data);
     return std::string();
   }
 
-  // check image type
+  // check image type and bounds against untrusted clipboard handles
   const BITMAPINFO *bitmap = static_cast<const BITMAPINFO *>(src);
+  const LONG rawW = bitmap->bmiHeader.biWidth;
+  const LONG rawH = bitmap->bmiHeader.biHeight;
+  if (bitmap->bmiHeader.biSize < sizeof(BITMAPINFOHEADER) || bitmap->bmiHeader.biSize > srcSize || rawW <= 0 ||
+      rawH == 0 || bitmap->bmiHeader.biPlanes != 1) {
+    GlobalUnlock(data);
+    return std::string();
+  }
+
+  const size_t w64 = static_cast<size_t>(rawW);
+  const int64_t hSigned = static_cast<int64_t>(rawH);
+  const size_t absH64 = static_cast<size_t>((hSigned < 0) ? -hSigned : hSigned);
+  static constexpr size_t kMaxDimension = 32768;
+  if (w64 > kMaxDimension || absH64 > kMaxDimension) {
+    GlobalUnlock(data);
+    return std::string();
+  }
+
   LOG(
       (CLOG_INFO "bitmap: %dx%d %d", bitmap->bmiHeader.biWidth, bitmap->bmiHeader.biHeight,
        (int)bitmap->bmiHeader.biBitCount)
   );
-  if (bitmap->bmiHeader.biPlanes == 1 && (bitmap->bmiHeader.biBitCount == 24 || bitmap->bmiHeader.biBitCount == 32) &&
+  if ((bitmap->bmiHeader.biBitCount == 24 || bitmap->bmiHeader.biBitCount == 32) &&
       bitmap->bmiHeader.biCompression == BI_RGB) {
-    // already in canonical form
-    std::string image(static_cast<char const *>(src), srcSize);
+    const size_t rowStride = (((w64 * static_cast<size_t>(bitmap->bmiHeader.biBitCount)) + 31U) / 32U) * 4U;
+    const size_t hdrOffset = static_cast<size_t>(bitmap->bmiHeader.biSize);
+    if (rowStride <= (srcSize - hdrOffset) / absH64) {
+      // already in canonical form
+      std::string image(static_cast<char const *>(src), srcSize);
+      GlobalUnlock(data);
+      return image;
+    }
     GlobalUnlock(data);
-    return image;
+    return std::string();
   }
 
   // Fast-path modern Windows 32-bit BI_BITFIELDS (standard BGRA8888 masks) without GDI round-trip
-  if (bitmap->bmiHeader.biPlanes == 1 && bitmap->bmiHeader.biBitCount == 32 &&
-      bitmap->bmiHeader.biCompression == BI_BITFIELDS && bitmap->bmiHeader.biWidth > 0) {
+  if (bitmap->bmiHeader.biBitCount == 32 && bitmap->bmiHeader.biCompression == BI_BITFIELDS) {
     const size_t maskOffset = sizeof(BITMAPINFOHEADER);
-    const size_t pixelOffset = (bitmap->bmiHeader.biSize == sizeof(BITMAPINFOHEADER))
-                                   ? (sizeof(BITMAPINFOHEADER) + 3 * sizeof(DWORD))
-                                   : static_cast<size_t>(bitmap->bmiHeader.biSize);
-    const LONG h = bitmap->bmiHeader.biHeight;
-    const size_t absH = static_cast<size_t>((h < 0) ? -static_cast<int64_t>(h) : static_cast<int64_t>(h));
-    const size_t pixelBytes = static_cast<size_t>(bitmap->bmiHeader.biWidth) * absH * 4;
-    if (srcSize >= maskOffset + 3 * sizeof(DWORD) && srcSize >= pixelOffset + pixelBytes) {
-      const auto *rawBytes = static_cast<const quint8 *>(src);
-      const quint32 rMask = qFromLittleEndian<quint32>(rawBytes + maskOffset);
-      const quint32 gMask = qFromLittleEndian<quint32>(rawBytes + maskOffset + 4);
-      const quint32 bMask = qFromLittleEndian<quint32>(rawBytes + maskOffset + 8);
-      if (rMask == 0x00ff0000u && gMask == 0x0000ff00u && bMask == 0x000000ffu) {
-        BITMAPINFOHEADER canonical = bitmap->bmiHeader;
-        canonical.biSize = sizeof(BITMAPINFOHEADER);
-        canonical.biCompression = BI_RGB;
-        canonical.biSizeImage = 0;
-        canonical.biClrUsed = 0;
-        canonical.biClrImportant = 0;
-        std::string image;
-        image.reserve(sizeof(BITMAPINFOHEADER) + pixelBytes);
-        image.append(reinterpret_cast<const char *>(&canonical), sizeof(BITMAPINFOHEADER));
-        image.append(reinterpret_cast<const char *>(rawBytes + pixelOffset), pixelBytes);
-        GlobalUnlock(data);
-        return image;
+    const size_t biSize = static_cast<size_t>(bitmap->bmiHeader.biSize);
+    if (biSize == sizeof(BITMAPINFOHEADER) || biSize >= sizeof(BITMAPINFOHEADER) + 3 * sizeof(DWORD)) {
+      const size_t pixelOffset =
+          (biSize == sizeof(BITMAPINFOHEADER)) ? (sizeof(BITMAPINFOHEADER) + 3 * sizeof(DWORD)) : biSize;
+      if (pixelOffset <= srcSize && w64 <= (srcSize - pixelOffset) / 4U / absH64) {
+        const size_t pixelBytes = w64 * absH64 * 4U;
+        const auto *rawBytes = static_cast<const quint8 *>(src);
+        const quint32 rMask = qFromLittleEndian<quint32>(rawBytes + maskOffset);
+        const quint32 gMask = qFromLittleEndian<quint32>(rawBytes + maskOffset + 4);
+        const quint32 bMask = qFromLittleEndian<quint32>(rawBytes + maskOffset + 8);
+        if (rMask == 0x00ff0000u && gMask == 0x0000ff00u && bMask == 0x000000ffu) {
+          BITMAPINFOHEADER canonical = bitmap->bmiHeader;
+          canonical.biSize = sizeof(BITMAPINFOHEADER);
+          canonical.biCompression = BI_RGB;
+          canonical.biSizeImage = 0;
+          canonical.biClrUsed = 0;
+          canonical.biClrImportant = 0;
+          std::string image;
+          image.reserve(sizeof(BITMAPINFOHEADER) + pixelBytes);
+          image.append(reinterpret_cast<const char *>(&canonical), sizeof(BITMAPINFOHEADER));
+          image.append(reinterpret_cast<const char *>(rawBytes + pixelOffset), pixelBytes);
+          GlobalUnlock(data);
+          return image;
+        }
       }
+    }
+  }
+
+  // Compute and validate pixel data offset & size before invoking GDI
+  size_t srcBitsOffset = static_cast<size_t>(bitmap->bmiHeader.biSize);
+  const WORD bitCount = bitmap->bmiHeader.biBitCount;
+  if (bitCount != 1 && bitCount != 4 && bitCount != 8 && bitCount != 16 && bitCount != 24 && bitCount != 32) {
+    GlobalUnlock(data);
+    return std::string();
+  }
+  if (bitCount >= 16) {
+    if (bitmap->bmiHeader.biCompression == BI_BITFIELDS && bitmap->bmiHeader.biSize == sizeof(BITMAPINFOHEADER) &&
+        (bitCount == 16 || bitCount == 32)) {
+      srcBitsOffset += 3 * sizeof(DWORD);
+    }
+  } else if (bitmap->bmiHeader.biClrUsed != 0) {
+    if (bitmap->bmiHeader.biClrUsed > (srcSize - srcBitsOffset) / sizeof(RGBQUAD)) {
+      GlobalUnlock(data);
+      return std::string();
+    }
+    srcBitsOffset += static_cast<size_t>(bitmap->bmiHeader.biClrUsed) * sizeof(RGBQUAD);
+  } else {
+    const size_t paletteBytes = (size_t{1} << bitCount) * sizeof(RGBQUAD);
+    if (paletteBytes > srcSize - srcBitsOffset) {
+      GlobalUnlock(data);
+      return std::string();
+    }
+    srcBitsOffset += paletteBytes;
+  }
+
+  if (srcBitsOffset > srcSize) {
+    GlobalUnlock(data);
+    return std::string();
+  }
+  const size_t availPixelBytes = srcSize - srcBitsOffset;
+  if (bitmap->bmiHeader.biCompression == BI_RGB || bitmap->bmiHeader.biCompression == BI_BITFIELDS) {
+    const size_t rowStride = (((w64 * static_cast<size_t>(bitCount)) + 31U) / 32U) * 4U;
+    if (rowStride > availPixelBytes / absH64) {
+      GlobalUnlock(data);
+      return std::string();
+    }
+  } else {
+    if (bitmap->bmiHeader.biSizeImage == 0 || bitmap->bmiHeader.biSizeImage > availPixelBytes) {
+      GlobalUnlock(data);
+      return std::string();
     }
   }
 
   // create a destination DIB section
   LOG_INFO("convert image from: depth=%d comp=%d", bitmap->bmiHeader.biBitCount, bitmap->bmiHeader.biCompression);
-  void *raw;
+  void *raw = nullptr;
   BITMAPINFOHEADER info;
-  LONG w = bitmap->bmiHeader.biWidth;
-  LONG h = bitmap->bmiHeader.biHeight;
-  const LONG absHeight = (h < 0) ? -h : h;
+  LONG w = rawW;
+  LONG h = rawH;
+  const LONG absHeight = static_cast<LONG>(absH64);
   info.biSize = sizeof(BITMAPINFOHEADER);
   info.biWidth = w;
   info.biHeight = h;
@@ -176,19 +253,7 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
     return std::string();
   }
 
-  // find the start of the pixel data
-  const char *srcBits = (const char *)bitmap + bitmap->bmiHeader.biSize;
-  if (bitmap->bmiHeader.biBitCount >= 16) {
-    if (bitmap->bmiHeader.biCompression == BI_BITFIELDS && bitmap->bmiHeader.biSize == sizeof(BITMAPINFOHEADER) &&
-        (bitmap->bmiHeader.biBitCount == 16 || bitmap->bmiHeader.biBitCount == 32)) {
-      srcBits += 3 * sizeof(DWORD);
-    }
-  } else if (bitmap->bmiHeader.biClrUsed != 0) {
-    srcBits += bitmap->bmiHeader.biClrUsed * sizeof(RGBQUAD);
-  } else {
-    // http://msdn.microsoft.com/en-us/library/ke55d167(VS.80).aspx
-    srcBits += (1i64 << bitmap->bmiHeader.biBitCount) * sizeof(RGBQUAD);
-  }
+  const char *srcBits = static_cast<const char *>(src) + srcBitsOffset;
 
   // copy source image to destination image
   HDC dstDC = CreateCompatibleDC(dc);
@@ -200,7 +265,7 @@ std::string MSWindowsClipboardBitmapConverter::toIClipboard(HANDLE data) const
 
   // extract data
   std::string image((const char *)&info, info.biSize);
-  image.append((const char *)raw, static_cast<size_t>(4) * static_cast<size_t>(w) * static_cast<size_t>(absHeight));
+  image.append((const char *)raw, 4U * w64 * absH64);
 
   // clean up GDI
   DeleteObject(dst);

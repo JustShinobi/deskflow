@@ -748,6 +748,7 @@ void MSWindowsDesks::deskThread(const void *vdesk)
       break;
 
     case DESKFLOW_MSG_ENTER:
+      flushAsyncMouse();
       m_isOnComputer = true;
       deskEnter(desk);
       break;

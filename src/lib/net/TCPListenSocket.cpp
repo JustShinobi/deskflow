@@ -97,17 +97,32 @@ void *TCPListenSocket::getEventTarget() const
 
 std::unique_ptr<IDataSocket> TCPListenSocket::accept()
 {
-  std::unique_ptr<IDataSocket> socket;
+  std::unique_ptr<TCPSocket> socket;
+  ArchNetAddress remoteAddr = nullptr;
   try {
-    socket = std::make_unique<TCPSocket>(m_events, m_socketMultiplexer, ARCH->acceptSocket(m_socket, nullptr));
+    ArchSocket accepted = ARCH->acceptSocket(m_socket, &remoteAddr);
+    std::string peerIp;
+    if (remoteAddr != nullptr) {
+      peerIp = ARCH->addrToString(remoteAddr);
+      ARCH->closeAddr(remoteAddr);
+      remoteAddr = nullptr;
+    }
+    socket = std::make_unique<TCPSocket>(m_events, m_socketMultiplexer, accepted);
+    socket->setPeerAddressString(std::move(peerIp));
     setListeningJob();
     return socket;
   } catch (ArchNetworkException &) {
+    if (remoteAddr != nullptr) {
+      ARCH->closeAddr(remoteAddr);
+    }
     if (socket) {
       setListeningJob();
     }
     return nullptr;
   } catch (std::exception &ex) {
+    if (remoteAddr != nullptr) {
+      ARCH->closeAddr(remoteAddr);
+    }
     if (socket) {
       setListeningJob();
     }

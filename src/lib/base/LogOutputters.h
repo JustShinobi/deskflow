@@ -10,6 +10,8 @@
 
 #include "base/ILogOutputter.h"
 
+#include <mutex>
+
 #include <QFile>
 #include <QString>
 //! Stop traversing log chain outputter
@@ -68,6 +70,9 @@ public:
   void setLogFilename(const QString &title);
 
 private:
+  void closeLocked();
+
+  std::mutex m_mutex;
   QString m_fileName;
   QFile m_file;
   qint64 m_currentSize = 0;

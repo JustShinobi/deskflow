@@ -15,10 +15,13 @@
 #include "net/SocketMultiplexer.h"
 #include "net/TSocketMultiplexerMethodJob.h"
 
+#include <openssl/crypto.h>
 #include <openssl/rand.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <limits>
 
 namespace {
 
@@ -28,6 +31,7 @@ constexpr uint8_t kMagic2 = 'U';
 constexpr uint8_t kMagic3 = '1';
 constexpr double kPeerActiveTimeoutSeconds = 8.0;
 constexpr double kClientPingIntervalSeconds = 2.0;
+constexpr size_t kMaxDatagramsPerPoll = 64;
 
 uint64_t rotl64(uint64_t v, int bits)
 {
@@ -97,11 +101,6 @@ uint32_t readBE32(const uint8_t *p)
          (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
 }
 
-uint64_t readBE64(const uint8_t *p)
-{
-  return (static_cast<uint64_t>(readBE32(p)) << 32) | static_cast<uint64_t>(readBE32(p + 4));
-}
-
 uint32_t sanitizeOptionWord(uint32_t word)
 {
   // Avoid colliding with legacy Client::setOptions OptionIDs if an older client connects.
@@ -112,10 +111,21 @@ uint32_t sanitizeOptionWord(uint32_t word)
   return word;
 }
 
+uint32_t nextNonZeroSeq(uint32_t &counter)
+{
+  if (++counter == 0) {
+    ++counter;
+  }
+  return counter;
+}
+
 bool isNewerSeq(uint32_t candidate, uint32_t baseline)
 {
+  if (candidate == 0) {
+    return false;
+  }
   if (baseline == 0) {
-    return candidate != 0;
+    return true;
   }
   return static_cast<int32_t>(candidate - baseline) > 0;
 }
@@ -123,6 +133,44 @@ bool isNewerSeq(uint32_t candidate, uint32_t baseline)
 int16_t clampInt16(int32_t v)
 {
   return static_cast<int16_t>(std::clamp<int32_t>(v, -32768, 32767));
+}
+
+int32_t saturatingAddInt32(int32_t a, int32_t b)
+{
+  const int64_t sum = static_cast<int64_t>(a) + static_cast<int64_t>(b);
+  return static_cast<int32_t>(
+      std::clamp<int64_t>(sum, std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max())
+  );
+}
+
+std::string normalizeIpString(std::string ip)
+{
+  for (char &ch : ip) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  static constexpr std::string_view kMappedPrefix = "::ffff:";
+  if (ip.rfind(kMappedPrefix, 0) == 0) {
+    ip.erase(0, kMappedPrefix.size());
+  }
+  return ip;
+}
+
+uint64_t
+computePayloadKeystream(uint8_t rawType, uint32_t clientId, uint32_t pktSeq, const UdpMotionChannel::SessionKey &key)
+{
+  // Domain-separated subkey for Encrypt-then-MAC keystream generation over (type, clientId, pktSeq)
+  const UdpMotionChannel::SessionKey encKey = {
+      key[0] ^ 0x656e6331U, key[1] ^ 0x7374726dU, key[2] ^ 0x6d61736bU, key[3] ^ 0xdf01df01U
+  };
+  uint8_t nonceBlock[UdpMotionChannel::kHeaderSize]{};
+  nonceBlock[0] = kMagic0;
+  nonceBlock[1] = kMagic1;
+  nonceBlock[2] = kMagic2;
+  nonceBlock[3] = kMagic3;
+  nonceBlock[4] = rawType;
+  writeBE32(nonceBlock + 8, clientId);
+  writeBE32(nonceBlock + 12, pktSeq);
+  return UdpMotionChannel::computeMac(nonceBlock, encKey);
 }
 
 } // namespace
@@ -189,20 +237,18 @@ void *UdpMotionChannel::getEventTarget() const
   return const_cast<UdpMotionChannel *>(this);
 }
 
-UdpMotionChannel::SessionKey UdpMotionChannel::generateSessionKey()
+bool UdpMotionChannel::generateSessionKey(SessionKey &out)
 {
-  SessionKey key{};
   uint8_t raw[16]{};
   if (RAND_bytes(raw, sizeof(raw)) != 1) {
-    // Fallback entropy mixing monotonic clock if CSPRNG were ever unavailable
-    const uint64_t t = static_cast<uint64_t>(Arch::time() * 1e9);
-    std::memcpy(raw, &t, sizeof(t));
-    std::memcpy(raw + 8, &t, sizeof(t));
+    LOG_ERR("CSPRNG failure generating UDP session key; keeping motion on TCP");
+    out = {};
+    return false;
   }
   for (size_t i = 0; i < 4; ++i) {
-    key[i] = sanitizeOptionWord(readBE32(raw + i * 4));
+    out[i] = sanitizeOptionWord(readBE32(raw + i * 4));
   }
-  return key;
+  return true;
 }
 
 uint64_t UdpMotionChannel::computeMac(const uint8_t header[kHeaderSize], const SessionKey &key)
@@ -248,17 +294,27 @@ void UdpMotionChannel::encodePacket(
     uint8_t out[kPacketSize]
 )
 {
+  const uint8_t rawType = static_cast<uint8_t>(type);
+  const uint64_t ks = computePayloadKeystream(rawType, clientId, pktSeq, key);
+  const uint16_t maskedEnter = static_cast<uint16_t>(enterSeq ^ static_cast<uint16_t>(ks & 0xffffULL));
+  const uint16_t maskedX =
+      static_cast<uint16_t>(static_cast<uint16_t>(x) ^ static_cast<uint16_t>((ks >> 16) & 0xffffULL));
+  const uint16_t maskedY =
+      static_cast<uint16_t>(static_cast<uint16_t>(y) ^ static_cast<uint16_t>((ks >> 32) & 0xffffULL));
+
   out[0] = kMagic0;
   out[1] = kMagic1;
   out[2] = kMagic2;
   out[3] = kMagic3;
-  out[4] = static_cast<uint8_t>(type);
+  out[4] = rawType;
   out[5] = 0;
-  writeBE16(out + 6, enterSeq);
+  writeBE16(out + 6, maskedEnter);
   writeBE32(out + 8, clientId);
   writeBE32(out + 12, pktSeq);
-  writeBE16(out + 16, static_cast<uint16_t>(x));
-  writeBE16(out + 18, static_cast<uint16_t>(y));
+  writeBE16(out + 16, maskedX);
+  writeBE16(out + 18, maskedY);
+
+  // Encrypt-then-MAC over full 20-byte ciphertext header
   const uint64_t mac = computeMac(out, key);
   writeBE64(out + 20, mac);
 }
@@ -287,19 +343,25 @@ bool UdpMotionChannel::verifyAndDecode(const uint8_t *buf, size_t len, const Ses
     return false;
   }
 
-  const uint64_t expectedMac = computeMac(buf, key);
-  const uint64_t wireMac = readBE64(buf + 20);
-  // Constant-time 64-bit tag check
-  if ((expectedMac ^ wireMac) != 0ULL) {
+  const uint32_t pktSeq = readBE32(buf + 12);
+  if (pktSeq == 0) {
     return false;
   }
 
+  const uint64_t expectedMac = computeMac(buf, key);
+  uint8_t expectedMacBytes[8];
+  writeBE64(expectedMacBytes, expectedMac);
+  if (CRYPTO_memcmp(expectedMacBytes, buf + 20, sizeof(expectedMacBytes)) != 0) {
+    return false;
+  }
+
+  const uint64_t ks = computePayloadKeystream(rawType, cid, pktSeq, key);
   out.type = static_cast<PacketType>(rawType);
-  out.enterSeq = readBE16(buf + 6);
+  out.enterSeq = static_cast<uint16_t>(readBE16(buf + 6) ^ static_cast<uint16_t>(ks & 0xffffULL));
   out.clientId = cid;
-  out.pktSeq = readBE32(buf + 12);
-  out.x = static_cast<int16_t>(readBE16(buf + 16));
-  out.y = static_cast<int16_t>(readBE16(buf + 18));
+  out.pktSeq = pktSeq;
+  out.x = static_cast<int16_t>(readBE16(buf + 16) ^ static_cast<uint16_t>((ks >> 16) & 0xffffULL));
+  out.y = static_cast<int16_t>(readBE16(buf + 18) ^ static_cast<uint16_t>((ks >> 32) & 0xffffULL));
   return true;
 }
 
@@ -315,15 +377,17 @@ bool UdpMotionChannel::openServer(const NetworkAddress &listenAddr)
     return false;
   }
 
+  ArchSocket sock = nullptr;
   try {
     const auto family = ARCH->getAddrFamily(listenAddr.getAddress());
-    ArchSocket sock = ARCH->newSocket(family, IArchNetwork::SocketType::DataGram);
+    sock = ARCH->newSocket(family, IArchNetwork::SocketType::DataGram);
     ARCH->bindSocket(sock, listenAddr.getAddress());
     ARCH->setLowLatencyOnSocket(sock);
 
     {
       std::scoped_lock lock{m_mutex};
       m_socket = sock;
+      sock = nullptr;
       m_isServer = true;
       m_boundPort = static_cast<uint16_t>(port);
     }
@@ -331,17 +395,39 @@ bool UdpMotionChannel::openServer(const NetworkAddress &listenAddr)
     LOG_INFO("UDP motion fast-path listening on port %u", m_boundPort);
     return true;
   } catch (const BaseException &e) {
+    if (sock != nullptr) {
+      try {
+        ARCH->closeSocket(sock);
+      } catch (const BaseException &) {
+        // ignore close failure on error path
+      }
+    }
     LOG_WARN("could not open UDP fast-path socket on port %d (falling back to TCP): %s", port, e.what());
     return false;
   }
 }
 
-UdpMotionChannel::ClientRegistration UdpMotionChannel::registerClient(const void *clientHandle)
+UdpMotionChannel::ClientRegistration
+UdpMotionChannel::registerClient(const void *clientHandle, const std::string &expectedPeerIp)
 {
   std::scoped_lock lock{m_mutex};
+
+  // Always rotate clientId + key + sequence state on re-registration (e.g. Server::setConfig reload)
+  // so the client's fresh UDP socket and reset Ping counter re-handshake immediately without nonce reuse.
   if (const auto existing = m_handleToId.find(clientHandle); existing != m_handleToId.end()) {
-    const auto &peer = m_peersById.at(existing->second);
-    return {peer.clientId, peer.key};
+    const uint32_t oldId = existing->second;
+    m_handleToId.erase(existing);
+    if (auto peerIt = m_peersById.find(oldId); peerIt != m_peersById.end()) {
+      if (peerIt->second.peerAddr != nullptr) {
+        ARCH->closeAddr(peerIt->second.peerAddr);
+      }
+      m_peersById.erase(peerIt);
+    }
+  }
+
+  SessionKey key{};
+  if (!generateSessionKey(key)) {
+    return {0, {}};
   }
 
   uint32_t cid = sanitizeOptionWord(m_nextClientId++);
@@ -351,10 +437,11 @@ UdpMotionChannel::ClientRegistration UdpMotionChannel::registerClient(const void
 
   ServerPeer peer{};
   peer.clientId = cid;
-  peer.key = generateSessionKey();
+  peer.key = key;
+  peer.expectedIp = expectedPeerIp.empty() ? std::string{} : normalizeIpString(expectedPeerIp);
   m_handleToId[clientHandle] = cid;
-  m_peersById.emplace(cid, peer);
-  return {peer.clientId, peer.key};
+  m_peersById.emplace(cid, std::move(peer));
+  return {cid, key};
 }
 
 void UdpMotionChannel::unregisterClient(const void *clientHandle)
@@ -413,7 +500,7 @@ bool UdpMotionChannel::sendMouseAbs(const void *clientHandle, uint16_t enterSeq,
     if ((Arch::time() - peer.lastHeardTime) > kPeerActiveTimeoutSeconds) {
       return false;
     }
-    const uint32_t seq = ++peer.txSeq;
+    const uint32_t seq = nextNonZeroSeq(peer.txSeq);
     encodePacket(PacketType::MouseAbs, enterSeq, peer.clientId, seq, clampInt16(x), clampInt16(y), peer.key, packet);
     sock = m_socket;
     dest = ARCH->copyAddr(peer.peerAddr);
@@ -451,9 +538,15 @@ bool UdpMotionChannel::sendMouseRel(const void *clientHandle, uint16_t enterSeq,
     if ((Arch::time() - peer.lastHeardTime) > kPeerActiveTimeoutSeconds) {
       return false;
     }
+    if (!peer.hasRelEnterSeq || peer.lastRelEnterSeq != enterSeq) {
+      peer.hasRelEnterSeq = true;
+      peer.lastRelEnterSeq = enterSeq;
+      peer.cumRelX = 0;
+      peer.cumRelY = 0;
+    }
     peer.cumRelX = static_cast<uint16_t>(peer.cumRelX + static_cast<uint16_t>(clampInt16(dx)));
     peer.cumRelY = static_cast<uint16_t>(peer.cumRelY + static_cast<uint16_t>(clampInt16(dy)));
-    const uint32_t seq = ++peer.txSeq;
+    const uint32_t seq = nextNonZeroSeq(peer.txSeq);
     encodePacket(
         PacketType::MouseRel, enterSeq, peer.clientId, seq, static_cast<int16_t>(peer.cumRelX),
         static_cast<int16_t>(peer.cumRelY), peer.key, packet
@@ -497,6 +590,7 @@ bool UdpMotionChannel::openClient(
     ArchNetAddress peer = ARCH->copyAddr(serverAddr.getAddress());
     ARCH->setAddrPort(peer, udpPort);
     ARCH->setLowLatencyOnSocket(sock, peer);
+    std::string expectedServerIp = normalizeIpString(ARCH->addrToString(peer));
 
     {
       std::scoped_lock lock{m_mutex};
@@ -505,9 +599,12 @@ bool UdpMotionChannel::openClient(
       m_clientId = clientId;
       m_clientKey = key;
       m_serverPeerAddr = peer;
+      m_expectedServerIp = std::move(expectedServerIp);
+      m_expectedServerPort = udpPort;
       m_clientPingSeq = 0;
       m_lastRxAbsSeq = 0;
       m_lastRxRelSeq = 0;
+      m_rxRelEnterSeq = 0;
       m_rxCumRelX = 0;
       m_rxCumRelY = 0;
       m_hasRelBaseline = false;
@@ -534,7 +631,7 @@ void UdpMotionChannel::sendClientPing()
     if (m_socket == nullptr || m_serverPeerAddr == nullptr) {
       return;
     }
-    const uint32_t seq = ++m_clientPingSeq;
+    const uint32_t seq = nextNonZeroSeq(m_clientPingSeq);
     encodePacket(PacketType::Ping, 0, m_clientId, seq, 0, 0, m_clientKey, packet);
     sock = m_socket;
     peer = ARCH->copyAddr(m_serverPeerAddr);
@@ -590,15 +687,12 @@ ISocketMultiplexerJob *UdpMotionChannel::newReadJob()
 
 ISocketMultiplexerJob *UdpMotionChannel::serviceSocket(ISocketMultiplexerJob *job, bool read, bool, bool error)
 {
-  if (error) {
-    return job;
-  }
-  if (!read) {
+  if (error || !read) {
     return job;
   }
 
   uint8_t buf[64];
-  for (;;) {
+  for (size_t pktCount = 0; pktCount < kMaxDatagramsPerPoll; ++pktCount) {
     ArchSocket sock = nullptr;
     bool isServer = false;
     {
@@ -613,7 +707,7 @@ ISocketMultiplexerJob *UdpMotionChannel::serviceSocket(ISocketMultiplexerJob *jo
     ArchNetAddress fromAddr = nullptr;
     size_t n = 0;
     try {
-      n = ARCH->readDatagram(sock, buf, sizeof(buf), isServer ? &fromAddr : nullptr);
+      n = ARCH->readDatagram(sock, buf, sizeof(buf), &fromAddr);
     } catch (const BaseException &) {
       if (fromAddr != nullptr) {
         ARCH->closeAddr(fromAddr);
@@ -630,11 +724,11 @@ ISocketMultiplexerJob *UdpMotionChannel::serviceSocket(ISocketMultiplexerJob *jo
 
     if (isServer) {
       handleServerDatagram(buf, n, fromAddr);
-      if (fromAddr != nullptr) {
-        ARCH->closeAddr(fromAddr);
-      }
     } else {
-      handleClientDatagram(buf, n);
+      handleClientDatagram(buf, n, fromAddr);
+    }
+    if (fromAddr != nullptr) {
+      ARCH->closeAddr(fromAddr);
     }
   }
 
@@ -652,6 +746,9 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
     return;
   }
 
+  const std::string senderIp = normalizeIpString(ARCH->addrToString(fromAddr));
+  const int senderPort = ARCH->getAddrPort(fromAddr);
+
   uint8_t ackPacket[kPacketSize];
   ArchSocket sock = nullptr;
   ArchNetAddress replyAddr = nullptr;
@@ -664,11 +761,15 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
       return;
     }
     ServerPeer &peer = it->second;
+    if (!peer.expectedIp.empty() && senderIp != peer.expectedIp) {
+      return;
+    }
+
     DecodedPacket pkt{};
     if (!verifyAndDecode(buf, len, peer.key, pkt) || pkt.type != PacketType::Ping) {
       return;
     }
-    if (peer.lastRxPingSeq != 0 && !isNewerSeq(pkt.pktSeq, peer.lastRxPingSeq) && pkt.pktSeq != peer.lastRxPingSeq) {
+    if (!isNewerSeq(pkt.pktSeq, peer.lastRxPingSeq)) {
       return;
     }
     peer.lastRxPingSeq = pkt.pktSeq;
@@ -683,16 +784,13 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
     }
     if (!peer.loggedReady) {
       peer.loggedReady = true;
-      LOG_INFO(
-          "UDP motion fast-path active for clientId=%u (%s:%d)", cid, ARCH->addrToString(fromAddr).c_str(),
-          ARCH->getAddrPort(fromAddr)
-      );
+      LOG_INFO("UDP motion fast-path active for clientId=%u (%s:%d)", cid, senderIp.c_str(), senderPort);
     }
 
-    const uint32_t seq = ++peer.txSeq;
+    const uint32_t seq = nextNonZeroSeq(peer.txSeq);
     encodePacket(
-        PacketType::Ack, 0, peer.clientId, seq, static_cast<int16_t>(peer.cumRelX), static_cast<int16_t>(peer.cumRelY),
-        peer.key, ackPacket
+        PacketType::Ack, peer.lastRelEnterSeq, peer.clientId, seq, static_cast<int16_t>(peer.cumRelX),
+        static_cast<int16_t>(peer.cumRelY), peer.key, ackPacket
     );
     sock = m_socket;
     replyAddr = ARCH->copyAddr(peer.peerAddr);
@@ -713,11 +811,23 @@ void UdpMotionChannel::handleServerDatagram(const uint8_t *buf, size_t len, Arch
   }
 }
 
-void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len)
+void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len, ArchNetAddress fromAddr)
 {
+  if (fromAddr == nullptr) {
+    return;
+  }
+
+  const std::string senderIp = normalizeIpString(ARCH->addrToString(fromAddr));
+  const int senderPort = ARCH->getAddrPort(fromAddr);
+
   bool shouldNotify = false;
   {
     std::scoped_lock lock{m_mutex};
+    if (senderPort != static_cast<int>(m_expectedServerPort) ||
+        (!m_expectedServerIp.empty() && senderIp != m_expectedServerIp)) {
+      return;
+    }
+
     DecodedPacket pkt{};
     if (!verifyAndDecode(buf, len, m_clientKey, pkt) || pkt.clientId != m_clientId) {
       return;
@@ -728,6 +838,7 @@ void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len)
       if (!m_hasRelBaseline) {
         m_rxCumRelX = pkt.x;
         m_rxCumRelY = pkt.y;
+        m_rxRelEnterSeq = pkt.enterSeq;
         m_hasRelBaseline = true;
       }
       if (!m_clientAcked.exchange(true, std::memory_order_release)) {
@@ -749,10 +860,15 @@ void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len)
     case PacketType::MouseRel:
       if (isNewerSeq(pkt.pktSeq, m_lastRxRelSeq)) {
         m_lastRxRelSeq = pkt.pktSeq;
-        if (!m_hasRelBaseline) {
+        if (!m_hasRelBaseline || m_rxRelEnterSeq != pkt.enterSeq) {
           m_rxCumRelX = 0;
           m_rxCumRelY = 0;
+          m_rxRelEnterSeq = pkt.enterSeq;
           m_hasRelBaseline = true;
+        }
+        if (!m_pendingBatch.hasRel || m_pendingBatch.relEnterSeq != pkt.enterSeq) {
+          m_pendingBatch.relDx = 0;
+          m_pendingBatch.relDy = 0;
         }
         const auto dx = static_cast<int16_t>(static_cast<uint16_t>(pkt.x) - static_cast<uint16_t>(m_rxCumRelX));
         const auto dy = static_cast<int16_t>(static_cast<uint16_t>(pkt.y) - static_cast<uint16_t>(m_rxCumRelY));
@@ -760,8 +876,8 @@ void UdpMotionChannel::handleClientDatagram(const uint8_t *buf, size_t len)
         m_rxCumRelY = pkt.y;
         m_pendingBatch.hasRel = true;
         m_pendingBatch.relEnterSeq = pkt.enterSeq;
-        m_pendingBatch.relDx += dx;
-        m_pendingBatch.relDy += dy;
+        m_pendingBatch.relDx = saturatingAddInt32(m_pendingBatch.relDx, dx);
+        m_pendingBatch.relDy = saturatingAddInt32(m_pendingBatch.relDy, dy);
         shouldNotify = true;
       }
       break;

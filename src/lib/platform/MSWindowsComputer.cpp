@@ -294,8 +294,17 @@ void MSWindowsComputer::leave()
     LOG_VERBOSE("centering cursor on leave: %+d, %+d", m_xCenter, m_yCenter);
     const int32_t screenW = GetSystemMetrics(SM_CXSCREEN);
     const int32_t screenH = GetSystemMetrics(SM_CYSCREEN);
+    // Switch hook to relay mode BEFORE parking the cursor so no 1000Hz move can
+    // slip through during warpCursor's yield and displace the OS cursor.
     m_hook.setRelayAnchor(m_xCenter, m_yCenter, screenW / 3, screenH / 3);
-    warpCursor(m_xCenter, m_yCenter);
+    m_hook.setMode(kHOOK_RELAY_EVENTS);
+    if (MSWindowsHook::isLowLevel()) {
+      setThisCursorPos(m_xCenter, m_yCenter);
+      saveMousePosition(m_xCenter, m_yCenter);
+      m_hook.setRelayAnchor(m_xCenter, m_yCenter, screenW / 3, screenH / 3);
+    } else {
+      warpCursor(m_xCenter, m_yCenter);
+    }
     m_remoteMotion.beginTransition(m_xCenter, m_yCenter, screenW, screenH);
 
     // disable special key sequences on win95 family
@@ -307,8 +316,6 @@ void MSWindowsComputer::leave()
     // remember the modifier state.  this is the modifier state
     // reflected in the internal keyboard state.
     m_keyState->saveModifiers();
-
-    m_hook.setMode(kHOOK_RELAY_EVENTS);
 
     m_primaryKeyDownList.clear();
     for (KeyButton i = 0; i < IKeyState::s_numButtons; ++i) {
@@ -437,7 +444,9 @@ bool MSWindowsComputer::getClipboard(ClipboardID id, IClipboard *dst) const
   }
 
   MSWindowsClipboard src(m_window);
-  Clipboard::copy(&m_cachedClipboard, &src);
+  if (!Clipboard::copy(&m_cachedClipboard, &src)) {
+    return false;
+  }
   m_lastReadClipboardSeq = GetClipboardSequenceNumber();
   Clipboard::copy(dst, &m_cachedClipboard);
   return true;
@@ -1281,6 +1290,7 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
     if (needsRecenter) {
       setThisCursorPos(m_xCenter, m_yCenter);
       saveMousePosition(m_xCenter, m_yCenter);
+      m_hook.setRelayAnchor(m_xCenter, m_yCenter, GetSystemMetrics(SM_CXSCREEN) / 3, GetSystemMetrics(SM_CYSCREEN) / 3);
     }
     if (dx != 0 || dy != 0) {
       sendEvent(EventTypes::PrimaryComputerMotionOnSecondary, MotionInfo::alloc(dx, dy));

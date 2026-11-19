@@ -31,10 +31,17 @@ SecureListenSocket::SecureListenSocket(
 std::unique_ptr<IDataSocket> SecureListenSocket::accept()
 {
   std::unique_ptr<SecureSocket> secureSocket;
+  ArchNetAddress remoteAddr = nullptr;
   try {
-    secureSocket = std::make_unique<SecureSocket>(
-        events(), socketMultiplexer(), ARCH->acceptSocket(socket(), nullptr), m_securityLevel
-    );
+    ArchSocket accepted = ARCH->acceptSocket(socket(), &remoteAddr);
+    std::string peerIp;
+    if (remoteAddr != nullptr) {
+      peerIp = ARCH->addrToString(remoteAddr);
+      ARCH->closeAddr(remoteAddr);
+      remoteAddr = nullptr;
+    }
+    secureSocket = std::make_unique<SecureSocket>(events(), socketMultiplexer(), accepted, m_securityLevel);
+    secureSocket->setPeerAddressString(std::move(peerIp));
     secureSocket->initSsl(true);
 
     setListeningJob();
@@ -48,11 +55,17 @@ std::unique_ptr<IDataSocket> SecureListenSocket::accept()
 
     return secureSocket;
   } catch (ArchNetworkException &) {
+    if (remoteAddr != nullptr) {
+      ARCH->closeAddr(remoteAddr);
+    }
     if (secureSocket) {
       setListeningJob();
     }
     return nullptr;
   } catch (std::exception &ex) {
+    if (remoteAddr != nullptr) {
+      ARCH->closeAddr(remoteAddr);
+    }
     if (secureSocket) {
       setListeningJob();
     }

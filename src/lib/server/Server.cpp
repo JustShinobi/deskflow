@@ -1138,19 +1138,25 @@ void Server::sendOptions(BaseClientProxy *client) const
   }
 
   if (m_udpChannel != nullptr && m_udpChannel->boundPort() != 0 && client != m_primaryClient) {
-    const auto reg = m_udpChannel->registerClient(client);
-    optionsList.push_back(kOptionUdpFastPathPort);
-    optionsList.push_back(static_cast<uint32_t>(m_udpChannel->boundPort()));
-    optionsList.push_back(kOptionUdpClientId);
-    optionsList.push_back(reg.clientId);
-    optionsList.push_back(kOptionUdpKey0);
-    optionsList.push_back(reg.key[0]);
-    optionsList.push_back(kOptionUdpKey1);
-    optionsList.push_back(reg.key[1]);
-    optionsList.push_back(kOptionUdpKey2);
-    optionsList.push_back(reg.key[2]);
-    optionsList.push_back(kOptionUdpKey3);
-    optionsList.push_back(reg.key[3]);
+    std::string expectedPeerIp;
+    if (auto *stream = client->getStream(); stream != nullptr) {
+      expectedPeerIp = stream->getPeerAddressString();
+    }
+    const auto reg = m_udpChannel->registerClient(client, expectedPeerIp);
+    if (reg.clientId != 0) {
+      optionsList.push_back(kOptionUdpFastPathPort);
+      optionsList.push_back(static_cast<uint32_t>(m_udpChannel->boundPort()));
+      optionsList.push_back(kOptionUdpClientId);
+      optionsList.push_back(reg.clientId);
+      optionsList.push_back(kOptionUdpKey0);
+      optionsList.push_back(reg.key[0]);
+      optionsList.push_back(kOptionUdpKey1);
+      optionsList.push_back(reg.key[1]);
+      optionsList.push_back(kOptionUdpKey2);
+      optionsList.push_back(reg.key[2]);
+      optionsList.push_back(kOptionUdpKey3);
+      optionsList.push_back(reg.key[3]);
+    }
   }
 
   // send the options
@@ -1637,6 +1643,8 @@ void Server::onKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const s
 {
   LOG_VERBOSE("onKeyDown id=%d mask=0x%04x button=0x%04x lang=%s", id, mask, button, lang.c_str());
   assert(m_active != nullptr);
+
+  flushPendingClientMotion();
 
   // relay
   if (!m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {

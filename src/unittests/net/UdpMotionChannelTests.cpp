@@ -28,6 +28,11 @@ uint16_t findAvailableLocalUdpPort()
   return probe.localPort();
 }
 
+uint16_t peekWireBE16(const uint8_t *p)
+{
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]));
+}
+
 } // namespace
 
 void UdpMotionChannelTests::initTestCase()
@@ -38,10 +43,17 @@ void UdpMotionChannelTests::initTestCase()
 
 void UdpMotionChannelTests::encodeAndVerify_roundTripAndTamperRejection()
 {
-  const auto key = UdpMotionChannel::generateSessionKey();
+  UdpMotionChannel::SessionKey key{};
+  QVERIFY(UdpMotionChannel::generateSessionKey(key));
   uint8_t wire[UdpMotionChannel::kPacketSize]{};
 
   UdpMotionChannel::encodePacket(UdpMotionChannel::PacketType::MouseAbs, 42, 0x12345678u, 99u, -1920, 1080, key, wire);
+
+  // Sensitive coordinates/enterSeq must be masked on the wire (Encrypt-then-MAC)
+  const bool allPlaintextOnWire = (peekWireBE16(wire + 6) == 42u) &&
+                                  (static_cast<int16_t>(peekWireBE16(wire + 16)) == -1920) &&
+                                  (static_cast<int16_t>(peekWireBE16(wire + 18)) == 1080);
+  QVERIFY(!allPlaintextOnWire);
 
   UdpMotionChannel::DecodedPacket decoded{};
   QVERIFY(UdpMotionChannel::verifyAndDecode(wire, sizeof(wire), key, decoded));
@@ -52,7 +64,7 @@ void UdpMotionChannelTests::encodeAndVerify_roundTripAndTamperRejection()
   QCOMPARE(decoded.x, int16_t{-1920});
   QCOMPARE(decoded.y, int16_t{1080});
 
-  // Flip one coordinate bit -> MAC verification must reject
+  // Flip one ciphertext coordinate bit -> MAC verification must reject before unmasking
   uint8_t tamperedPayload = wire[16];
   wire[16] ^= 0x01u;
   QVERIFY(!UdpMotionChannel::verifyAndDecode(wire, sizeof(wire), key, decoded));
@@ -85,13 +97,26 @@ void UdpMotionChannelTests::loopbackHandshakeAndMotion_coalescesAbsAndRecoversRe
   QCOMPARE(server.boundPort(), port);
 
   int dummyClientHandle = 0;
-  const auto reg = server.registerClient(&dummyClientHandle);
-  QVERIFY(reg.clientId != 0);
+  const auto reg1 = server.registerClient(&dummyClientHandle, "127.0.0.1");
+  QVERIFY(reg1.clientId != 0);
 
   UdpMotionChannel client(&events, &multiplexer);
-  QVERIFY(client.openClient(listenAddr, port, reg.clientId, reg.key));
+  QVERIFY(client.openClient(listenAddr, port, reg1.clientId, reg1.key));
 
-  // Wait for UDP Ping/Ack handshake over loopback
+  QVERIFY(
+      QTest::qWaitFor(
+          [&]() { return server.isClientActive(&dummyClientHandle) && client.isServerHandshakeAcked(); }, 2000
+      )
+  );
+
+  // Re-registering the same client handle (simulating Server::setConfig reload) must rotate credentials
+  // and immediately re-handshake on a fresh ephemeral client socket.
+  const auto reg2 = server.registerClient(&dummyClientHandle, "::ffff:127.0.0.1");
+  QVERIFY(reg2.clientId != 0);
+  QVERIFY(reg2.clientId != reg1.clientId);
+  QVERIFY(!server.isClientActive(&dummyClientHandle));
+
+  QVERIFY(client.openClient(listenAddr, port, reg2.clientId, reg2.key));
   QVERIFY(
       QTest::qWaitFor(
           [&]() { return server.isClientActive(&dummyClientHandle) && client.isServerHandshakeAcked(); }, 2000

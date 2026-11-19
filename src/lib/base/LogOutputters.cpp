@@ -132,15 +132,17 @@ FileLogOutputter::~FileLogOutputter()
 void FileLogOutputter::setLogFilename(const QString &logFile)
 {
   assert(logFile != nullptr);
+  std::scoped_lock lock{m_mutex};
   if (m_fileName == logFile) {
     return;
   }
-  close();
+  closeLocked();
   m_fileName = logFile;
 }
 
 bool FileLogOutputter::write(LogLevel::Level, const QString &message)
 {
+  std::scoped_lock lock{m_mutex};
   if (!m_file.isOpen()) {
     m_file.setFileName(m_fileName);
     if (!m_file.open(QFile::WriteOnly | QFile::Append)) {
@@ -153,14 +155,14 @@ bool FileLogOutputter::write(LogLevel::Level, const QString &message)
   payload.append('\n');
   const qint64 written = m_file.write(payload);
   if (written < 0) {
-    close();
+    closeLocked();
     return false;
   }
   m_file.flush();
   m_currentSize += written;
 
   if (m_currentSize > s_logFileSizeLimit) {
-    close();
+    closeLocked();
     const auto oldFile = QStringLiteral("%1.1").arg(m_fileName);
     QFile::remove(oldFile);
     QFile::rename(m_fileName, oldFile);
@@ -175,6 +177,12 @@ void FileLogOutputter::open(const QString &)
 }
 
 void FileLogOutputter::close()
+{
+  std::scoped_lock lock{m_mutex};
+  closeLocked();
+}
+
+void FileLogOutputter::closeLocked()
 {
   if (m_file.isOpen()) {
     m_file.close();

@@ -541,12 +541,9 @@ void EiComputer::resetOptions()
 
 void EiComputer::setOptions(const OptionsList &options)
 {
-  for (auto it = options.begin(); it != options.end(); ++it) {
-    if (*it == kOptionClipboardSharingSize) {
-      ++it;
-      if (it == options.end())
-        break;
-      m_maximumClipboardSize = *it;
+  for (size_t i = 0; i + 1 < options.size(); i += 2) {
+    if (options[i] == kOptionClipboardSharingSize) {
+      m_maximumClipboardSize = options[i + 1];
       LOG_DEBUG("computer received clipboard size limit: %zu KB", m_maximumClipboardSize);
     }
   }
