@@ -23,45 +23,122 @@
 
 namespace {
 
-void writeInt(uint32_t Value, uint32_t Length, std::vector<uint8_t> &Buffer)
+uint8_t *writeIntToPtr(uint32_t value, uint32_t length, uint8_t *dst)
 {
-  switch (Length) {
+  switch (length) {
   case 1:
-    Buffer.push_back(static_cast<uint8_t>(Value & 0xffU));
+    *dst++ = static_cast<uint8_t>(value & 0xffU);
     break;
   case 4:
-    Buffer.push_back(static_cast<uint8_t>((Value >> 24U) & 0xffU));
-    Buffer.push_back(static_cast<uint8_t>((Value >> 16U) & 0xffU));
-    Buffer.push_back(static_cast<uint8_t>((Value >> 8U) & 0xffU));
-    Buffer.push_back(static_cast<uint8_t>(Value & 0xffU));
+    *dst++ = static_cast<uint8_t>((value >> 24U) & 0xffU);
+    *dst++ = static_cast<uint8_t>((value >> 16U) & 0xffU);
+    *dst++ = static_cast<uint8_t>((value >> 8U) & 0xffU);
+    *dst++ = static_cast<uint8_t>(value & 0xffU);
     break;
   case 2:
-    Buffer.push_back(static_cast<uint8_t>((Value >> 8U) & 0xffU));
-    Buffer.push_back(static_cast<uint8_t>(Value & 0xffU));
+    *dst++ = static_cast<uint8_t>((value >> 8U) & 0xffU);
+    *dst++ = static_cast<uint8_t>(value & 0xffU);
     break;
   default:
     assert(0 && "invalid integer format length");
-    return;
+    break;
   }
+  return dst;
 }
 
-template <typename T> void writeVectorInt(const std::vector<T> *VectorData, std::vector<uint8_t> &Buffer)
+template <typename T> uint8_t *writeVectorIntToPtr(const std::vector<T> *vectorData, uint8_t *dst)
 {
-  if (VectorData) {
-    const std::vector<T> &Vector = *VectorData;
-    writeInt((uint32_t)Vector.size(), sizeof(uint32_t), Buffer);
-    for (size_t i = 0; i < Vector.size(); ++i) {
-      writeInt(Vector[i], sizeof(T), Buffer);
+  if (vectorData != nullptr) {
+    const std::vector<T> &vec = *vectorData;
+    dst = writeIntToPtr(static_cast<uint32_t>(vec.size()), sizeof(uint32_t), dst);
+    for (size_t i = 0; i < vec.size(); ++i) {
+      dst = writeIntToPtr(vec[i], sizeof(T), dst);
     }
   }
+  return dst;
 }
 
-void writeString(const std::string *StringData, std::vector<uint8_t> &Buffer)
+uint8_t *writeStringToPtr(const std::string *stringData, uint8_t *dst)
 {
-  const uint32_t len = (StringData != nullptr) ? (uint32_t)StringData->size() : 0;
-  writeInt(len, sizeof(len), Buffer);
+  const uint32_t len = (stringData != nullptr) ? static_cast<uint32_t>(stringData->size()) : 0;
+  dst = writeIntToPtr(len, sizeof(len), dst);
   if (len != 0) {
-    std::copy(StringData->begin(), StringData->end(), std::back_inserter(Buffer));
+    std::memcpy(dst, stringData->data(), len);
+    dst += len;
+  }
+  return dst;
+}
+
+uint32_t eatFormatLength(const char **pfmt)
+{
+  const char *fmt = *pfmt;
+  uint32_t n = 0;
+  while (*fmt >= '0' && *fmt <= '9') {
+    n = 10 * n + static_cast<uint32_t>(*fmt - '0');
+    ++fmt;
+  }
+  *pfmt = fmt;
+  return n;
+}
+
+void writeFormattedBytes(uint8_t *dst, const char *fmt, va_list args)
+{
+  while (*fmt) {
+    if (*fmt == '%') {
+      ++fmt;
+      const auto len = eatFormatLength(&fmt);
+      switch (*fmt) {
+      case 'i': {
+        const uint32_t v = va_arg(args, uint32_t);
+        dst = writeIntToPtr(v, len, dst);
+        break;
+      }
+      case 'I': {
+        switch (len) {
+        case 1:
+          dst = writeVectorIntToPtr(va_arg(args, const std::vector<uint8_t> *), dst);
+          break;
+        case 2:
+          dst = writeVectorIntToPtr(va_arg(args, const std::vector<uint16_t> *), dst);
+          break;
+        case 4:
+          dst = writeVectorIntToPtr(va_arg(args, const std::vector<uint32_t> *), dst);
+          break;
+        default:
+          assert(0 && "invalid integer vector format length");
+          return;
+        }
+        break;
+      }
+      case 's': {
+        assert(len == 0);
+        const std::string *src = va_arg(args, std::string *);
+        dst = writeStringToPtr(src, dst);
+        break;
+      }
+      case 'S': {
+        assert(len == 0);
+        const uint32_t byteLen = va_arg(args, uint32_t);
+        const uint8_t *src = va_arg(args, uint8_t *);
+        dst = writeIntToPtr(byteLen, sizeof(byteLen), dst);
+        if (byteLen != 0) {
+          std::memcpy(dst, src, byteLen);
+          dst += byteLen;
+        }
+        break;
+      }
+      case '%':
+        assert(len == 0);
+        *dst++ = '%';
+        break;
+      default:
+        assert(0 && "invalid format specifier");
+        break;
+      }
+      ++fmt;
+    } else {
+      *dst++ = static_cast<uint8_t>(*fmt++);
+    }
   }
 }
 
@@ -114,13 +191,17 @@ void ProtocolUtil::vwritef(deskflow::IStream *stream, const char *fmt, uint32_t 
     return;
   }
 
-  // fill buffer
-  std::vector<uint8_t> Buffer;
-  writef(Buffer, fmt, args);
+  uint8_t stackBuffer[128];
+  std::vector<uint8_t> heapBuffer;
+  uint8_t *out = stackBuffer;
+  if (size > sizeof(stackBuffer)) {
+    heapBuffer.resize(size);
+    out = heapBuffer.data();
+  }
+  writeFormattedBytes(out, fmt, args);
 
   try {
-    // write buffer
-    stream->write(Buffer.data(), size);
+    stream->write(out, size);
     LOG_VERBOSE("wrote %d bytes", size);
   } catch (const BaseException &exception) {
     LOG_VERBOSE("exception <%s> during wrote %d bytes into stream", exception.what(), size);
@@ -295,79 +376,14 @@ uint32_t ProtocolUtil::getLength(const char *fmt, va_list args)
 
 void ProtocolUtil::writef(std::vector<uint8_t> &buffer, const char *fmt, va_list args)
 {
-  while (*fmt) {
-    if (*fmt == '%') {
-      // format specifier.  determine argument size.
-      ++fmt;
-      auto len = eatLength(&fmt);
-      switch (*fmt) {
-      case 'i': {
-        const uint32_t v = va_arg(args, uint32_t);
-        writeInt(v, len, buffer);
-        break;
-      }
-
-      case 'I': {
-        switch (len) {
-        case 1: {
-          // 1 byte integers
-          const std::vector<uint8_t> *list = va_arg(args, const std::vector<uint8_t> *);
-          writeVectorInt(list, buffer);
-          break;
-        }
-
-        case 2: {
-          // 2 byte integers
-          const std::vector<uint16_t> *list = va_arg(args, const std::vector<uint16_t> *);
-          writeVectorInt(list, buffer);
-          break;
-        }
-
-        case 4: {
-          // 4 byte integers
-          const std::vector<uint32_t> *list = va_arg(args, const std::vector<uint32_t> *);
-          writeVectorInt(list, buffer);
-          break;
-        }
-
-        default:
-          assert(0 && "invalid integer vector format length");
-          return;
-        }
-        break;
-      }
-
-      case 's': {
-        assert(len == 0);
-        const std::string *src = va_arg(args, std::string *);
-        writeString(src, buffer);
-        break;
-      }
-
-      case 'S': {
-        assert(len == 0);
-        const uint32_t len = va_arg(args, uint32_t);
-        const uint8_t *src = va_arg(args, uint8_t *);
-        writeInt(len, sizeof(len), buffer);
-        std::copy(src, src + len, std::back_inserter(buffer));
-        break;
-      }
-
-      case '%':
-        assert(len == 0);
-        buffer.push_back('%');
-        break;
-
-      default:
-        assert(0 && "invalid format specifier");
-      }
-
-      // next format character
-      ++fmt;
-    } else {
-      // copy regular character
-      buffer.push_back(*fmt++);
-    }
+  va_list copy;
+  va_copy(copy, args);
+  const uint32_t size = getLength(fmt, copy);
+  va_end(copy);
+  const size_t offset = buffer.size();
+  buffer.resize(offset + size);
+  if (size != 0) {
+    writeFormattedBytes(buffer.data() + offset, fmt, args);
   }
 }
 
@@ -480,7 +496,8 @@ uint32_t ProtocolUtil::read4BytesInt(deskflow::IStream *stream)
 void ProtocolUtil::readVector1ByteInt(deskflow::IStream *stream, std::vector<uint8_t> &destination)
 {
   auto size = readVectorSize(stream);
-  for (auto i = 0; i < size; ++i) {
+  destination.reserve(destination.size() + size);
+  for (uint32_t i = 0; i < size; ++i) {
     destination.push_back(read1ByteInt(stream));
   }
 }
@@ -488,7 +505,8 @@ void ProtocolUtil::readVector1ByteInt(deskflow::IStream *stream, std::vector<uin
 void ProtocolUtil::readVector2BytesInt(deskflow::IStream *stream, std::vector<uint16_t> &destination)
 {
   auto size = readVectorSize(stream);
-  for (auto i = 0; i < size; ++i) {
+  destination.reserve(destination.size() + size);
+  for (uint32_t i = 0; i < size; ++i) {
     destination.push_back(read2BytesInt(stream));
   }
 }
@@ -496,7 +514,8 @@ void ProtocolUtil::readVector2BytesInt(deskflow::IStream *stream, std::vector<ui
 void ProtocolUtil::readVector4BytesInt(deskflow::IStream *stream, std::vector<uint32_t> &destination)
 {
   auto size = readVectorSize(stream);
-  for (auto i = 0; i < size; ++i) {
+  destination.reserve(destination.size() + size);
+  for (uint32_t i = 0; i < size; ++i) {
     destination.push_back(read4BytesInt(stream));
   }
 }
@@ -515,53 +534,39 @@ uint32_t ProtocolUtil::readVectorSize(deskflow::IStream *stream)
 
 void ProtocolUtil::readBytes(deskflow::IStream *stream, uint32_t len, std::string *destination)
 {
-  // read the string length
-  uint8_t buffer[128];
-
   // when string length is 0, this implies that the size of the string is
   // variable and will be embedded in the stream.
   if (len == 0) {
     len = read4BytesInt(stream);
   }
 
-  // use a fixed size buffer if its big enough
-  const bool useFixed = (len <= sizeof(buffer));
+  if (len > PROTOCOL_MAX_STRING_LENGTH) {
+    LOG_ERR("read: string length exceeds maximum allowed size: %u", len);
+    throw BadClientException("Too long message received");
+  }
 
-  // allocate a buffer to read the data
-  uint8_t *sBuffer = buffer;
-  if (!useFixed) {
+  if (destination != nullptr) {
     try {
-      sBuffer = new uint8_t[len];
+      destination->resize(len);
     } catch (std::bad_alloc &exception) {
-      // Added try catch due to GHSA-chfm-333q-gfpp
-      LOG_ERR("bad alloc, unable to allocate memory %d bytes", len);
-      LOG_DEBUG("bad_alloc detected: is there enough memory?");
+      LOG_ERR("bad alloc, unable to allocate memory %u bytes", len);
       throw exception;
     }
-  }
-
-  // read the data
-  try {
-    read(stream, sBuffer, len);
-  } catch (...) {
-    if (!useFixed) {
-      delete[] sBuffer;
+    if (len != 0) {
+      read(stream, destination->data(), len);
     }
-    throw;
+    LOG_VERBOSE("readf: read %u byte string", len);
+    return;
   }
 
-  LOG_VERBOSE("readf: read %d byte string", len);
-
-  // save the data
-
-  if (destination) {
-    destination->assign((const char *)sBuffer, len);
+  uint8_t discard[256];
+  uint32_t remaining = len;
+  while (remaining > 0) {
+    const uint32_t chunk = (remaining < sizeof(discard)) ? remaining : static_cast<uint32_t>(sizeof(discard));
+    read(stream, discard, chunk);
+    remaining -= chunk;
   }
-
-  // release the buffer
-  if (!useFixed) {
-    delete[] sBuffer;
-  }
+  LOG_VERBOSE("readf: discarded %u byte string", len);
 }
 
 //

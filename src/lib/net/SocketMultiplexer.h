@@ -9,6 +9,7 @@
 
 #include <list>
 #include <map>
+#include <thread>
 
 template <class T> class CondVar;
 class Mutex;
@@ -60,19 +61,6 @@ private:
   // false.  only the service thread sets m_polling.
   [[noreturn]] void serviceThread(const void *);
 
-  // create, iterate, and destroy a cursor.  a cursor is used to
-  // safely iterate through the job list while other threads modify
-  // the list.  it works by inserting a dummy item in the list and
-  // moving that item through the list.  the dummy item will never
-  // be removed by other edits so an iterator pointing at the item
-  // remains valid until we remove the dummy item in deleteCursor().
-  // nextCursor() finds the next non-dummy item, moves our dummy
-  // item just past it, and returns an iterator for the non-dummy
-  // item.  all cursor calls lock the mutex for their duration.
-  JobCursor newCursor();
-  JobCursor nextCursor(JobCursor);
-  void deleteCursor(JobCursor);
-
   // lock out locking the job list.  this blocks if another thread
   // has already locked out locking.  once it returns, only the
   // calling thread will be able to lock the job list after any
@@ -93,10 +81,9 @@ private:
   CondVar<bool> *m_jobsReady = nullptr;
   CondVar<bool> *m_jobListLock = nullptr;
   CondVar<bool> *m_jobListLockLocked = nullptr;
-  Thread *m_jobListLocker = nullptr;
-  Thread *m_jobListLockLocker = nullptr;
+  std::thread::id m_jobListLocker{};
+  std::thread::id m_jobListLockLocker{};
 
   SocketJobs m_socketJobs = {};
   SocketJobMap m_socketJobMap = {};
-  ISocketMultiplexerJob *m_cursorMark = nullptr;
 };

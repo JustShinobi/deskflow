@@ -96,7 +96,9 @@ private:
   using MessageParser = bool (ClientProxy1_0::*)(const uint8_t *);
 
   ClientInfo m_info;
-  double m_heartbeatAlarm;
+  double m_heartbeatAlarm = 0.0;
+  double m_lastActivityTime = 0.0;
+  bool m_hasActivity = false;
   EventQueueTimer *m_heartbeatTimer = nullptr;
   MessageParser m_parser = &ClientProxy1_0::parseHandshakeMessage;
   IEventQueue *m_events;

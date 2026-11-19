@@ -364,6 +364,62 @@ size_t ArchNetworkBSD::writeSocket(ArchSocket s, const void *buf, size_t len)
   return n;
 }
 
+size_t ArchNetworkBSD::readDatagram(ArchSocket s, void *buf, size_t len, ArchNetAddress *fromAddr)
+{
+  assert(s != nullptr);
+
+  sockaddr_storage storage{};
+  auto fromLen = static_cast<socklen_t>(sizeof(storage));
+  const ssize_t n = ::recvfrom(s->m_fd, buf, len, 0, reinterpret_cast<struct sockaddr *>(&storage), &fromLen);
+  if (n == -1) {
+    if (fromAddr != nullptr) {
+      *fromAddr = nullptr;
+    }
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+      return 0;
+    }
+    throwError(errno);
+  }
+
+  if (fromAddr != nullptr && fromLen > 0) {
+    auto *addr = new ArchNetAddressImpl;
+    addr->m_len = fromLen;
+    memcpy(&addr->m_addr, &storage, static_cast<size_t>(fromLen));
+    *fromAddr = addr;
+  }
+  return static_cast<size_t>(n);
+}
+
+size_t ArchNetworkBSD::writeDatagram(ArchSocket s, const void *buf, size_t len, ArchNetAddress toAddr)
+{
+  assert(s != nullptr);
+  assert(toAddr != nullptr);
+
+  const ssize_t n = ::sendto(s->m_fd, buf, len, 0, TYPED_ADDR(const struct sockaddr, toAddr), toAddr->m_len);
+  if (n == -1) {
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS) {
+      return 0;
+    }
+    throwError(errno);
+  }
+  return static_cast<size_t>(n);
+}
+
+void ArchNetworkBSD::setLowLatencyOnSocket(ArchSocket s, ArchNetAddress)
+{
+  if (s == nullptr) {
+    return;
+  }
+#ifdef IP_TOS
+  const int tos = 0xB8; // DSCP EF (46 << 2) -> Wi-Fi WMM AC_VO
+  setsockopt(s->m_fd, IPPROTO_IP, IP_TOS, reinterpret_cast<const optval_t *>(&tos), sizeof(tos));
+#endif
+#ifdef IPV6_TCLASS
+  const int tclass = 0xB8;
+  setsockopt(s->m_fd, IPPROTO_IPV6, IPV6_TCLASS, reinterpret_cast<const optval_t *>(&tclass), sizeof(tclass));
+#endif
+}
+
 void ArchNetworkBSD::throwErrorOnSocket(ArchSocket s)
 {
   assert(s != nullptr);

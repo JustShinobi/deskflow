@@ -62,9 +62,8 @@ void ClientProxy1_3::setHeartbeatRate(double rate, double)
 
 void ClientProxy1_3::resetHeartbeatTimer()
 {
-  // reset the alarm but not the keep alive timer
-  ClientProxy1_2::removeHeartbeatTimer();
-  ClientProxy1_2::addHeartbeatTimer();
+  // reset the alarm in O(1) without touching the periodic keep-alive timer
+  ClientProxy1_2::resetHeartbeatTimer();
 }
 
 void ClientProxy1_3::addHeartbeatTimer()

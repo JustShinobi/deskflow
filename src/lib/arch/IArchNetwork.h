@@ -211,6 +211,26 @@ public:
   */
   virtual size_t writeSocket(ArchSocket s, const void *buf, size_t len) = 0;
 
+  //! Read a datagram from a UDP socket
+  virtual size_t readDatagram(ArchSocket, void *, size_t, ArchNetAddress *fromAddr = nullptr)
+  {
+    if (fromAddr != nullptr) {
+      *fromAddr = nullptr;
+    }
+    return 0;
+  }
+
+  //! Write a datagram to a UDP socket
+  virtual size_t writeDatagram(ArchSocket, const void *, size_t, ArchNetAddress)
+  {
+    return 0;
+  }
+
+  //! Mark socket for low-latency interactive QoS (DSCP EF / Wi-Fi WMM AC_VO)
+  virtual void setLowLatencyOnSocket(ArchSocket, ArchNetAddress = nullptr)
+  {
+  }
+
   //! Reset the writable poll hint for a socket
   /*!
   Tells pollSocket() to wait for a fresh writable notification instead of

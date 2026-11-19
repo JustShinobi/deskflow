@@ -245,6 +245,12 @@ uint32_t TCPSocket::getSize() const
   return m_inputBuffer.getSize();
 }
 
+uint32_t TCPSocket::getOutputSize() const
+{
+  Lock lock(&m_mutex);
+  return m_outputBuffer.getSize();
+}
+
 void TCPSocket::connect(const NetworkAddress &addr)
 {
   {
@@ -258,10 +264,12 @@ void TCPSocket::connect(const NetworkAddress &addr)
 
     try {
       if (ARCH->connectSocket(m_socket, addr.getAddress())) {
+        ARCH->setLowLatencyOnSocket(m_socket, addr.getAddress());
         sendEvent(EventTypes::DataSocketConnected);
         onConnected();
       } else {
         // connection is in progress
+        ARCH->setLowLatencyOnSocket(m_socket, addr.getAddress());
         m_writable = true;
       }
     } catch (const ArchNetworkException &e) {
@@ -301,7 +309,6 @@ void TCPSocket::init()
 TCPSocket::JobResult TCPSocket::doRead()
 {
   uint8_t buffer[4096];
-  memset(buffer, 0, sizeof(buffer));
   size_t bytesRead = 0;
 
   bytesRead = ARCH->readSocket(m_socket, buffer, sizeof(buffer));
@@ -352,7 +359,7 @@ TCPSocket::JobResult TCPSocket::doWrite()
 
   if (bytesWrote > 0) {
     discardWrittenData(bytesWrote);
-    return JobResult::New;
+    return (m_outputBuffer.getSize() == 0) ? JobResult::New : JobResult::Retry;
   }
 
   return JobResult::Retry;
@@ -409,7 +416,6 @@ void TCPSocket::discardWrittenData(int bytesWrote)
 {
   m_outputBuffer.pop(bytesWrote);
   if (m_outputBuffer.getSize() == 0) {
-    sendEvent(EventTypes::StreamOutputFlushed);
     m_flushed = true;
     m_flushed.broadcast();
   }
@@ -417,6 +423,9 @@ void TCPSocket::discardWrittenData(int bytesWrote)
 
 void TCPSocket::onConnected()
 {
+  if (m_socket != nullptr) {
+    ARCH->setLowLatencyOnSocket(m_socket);
+  }
   m_connected = true;
   m_readable = true;
   m_writable = true;

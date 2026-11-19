@@ -118,9 +118,8 @@ void SecureSocket::secureAccept()
 TCPSocket::JobResult SecureSocket::doRead()
 {
   using enum JobResult;
-  static uint8_t buffer[4096];
-  static const auto bufferSize = std::size(buffer);
-  memset(buffer, 0, bufferSize);
+  uint8_t buffer[4096];
+  const auto bufferSize = static_cast<int>(std::size(buffer));
   int bytesRead = 0;
   int status = 0;
 
@@ -215,7 +214,7 @@ TCPSocket::JobResult SecureSocket::doWrite()
 
   if (bytesWrote > 0) {
     discardWrittenData(bytesWrote);
-    return New;
+    return (m_outputBuffer.getSize() == 0) ? New : Retry;
   }
 
   return Retry;
@@ -358,6 +357,8 @@ void SecureSocket::initContext(bool server)
 
   if (m_ssl->m_context == nullptr) {
     SslLogger::logError();
+  } else {
+    SSL_CTX_set_mode(m_ssl->m_context, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
   }
 
   if (m_securityLevel == SecurityLevel::PeerAuth) {
@@ -415,7 +416,7 @@ int SecureSocket::secureAccept(int socket)
   LOG_VERBOSE("accepting secure socket");
   int r = SSL_accept(m_ssl->m_ssl);
 
-  static int retry;
+  int retry = 0;
 
   checkResult(r, retry);
 
@@ -473,7 +474,7 @@ int SecureSocket::secureConnect(int socket)
 
   int r = SSL_connect(m_ssl->m_ssl);
 
-  static int retry;
+  int retry = 0;
 
   checkResult(r, retry);
 

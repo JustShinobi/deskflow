@@ -8,6 +8,7 @@
 
 #include "server/ClientProxy1_0.h"
 
+#include "arch/Arch.h"
 #include "base/IEventQueue.h"
 #include "base/Log.h"
 #include "deskflow/DeskflowException.h"
@@ -76,6 +77,8 @@ void ClientProxy1_0::removeHandlers()
 void ClientProxy1_0::addHeartbeatTimer()
 {
   if (m_heartbeatAlarm > 0.0) {
+    m_hasActivity = false;
+    m_lastActivityTime = Arch::time();
     m_heartbeatTimer = m_events->newOneShotTimer(m_heartbeatAlarm, this);
   }
 }
@@ -86,13 +89,19 @@ void ClientProxy1_0::removeHeartbeatTimer()
     m_events->deleteTimer(m_heartbeatTimer);
     m_heartbeatTimer = nullptr;
   }
+  m_hasActivity = false;
 }
 
 void ClientProxy1_0::resetHeartbeatTimer()
 {
-  // reset the alarm
-  removeHeartbeatTimer();
-  addHeartbeatTimer();
+  // Record activity timestamp in O(1) instead of tearing down and reallocating
+  // heap timers on every incoming packet.
+  if (m_heartbeatTimer != nullptr) {
+    m_lastActivityTime = Arch::time();
+    m_hasActivity = true;
+  } else {
+    ClientProxy1_0::addHeartbeatTimer();
+  }
 }
 
 void ClientProxy1_0::resetHeartbeatRate()
@@ -149,7 +158,7 @@ bool ClientProxy1_0::parseHandshakeMessage(const uint8_t *code)
 {
   if (memcmp(code, kMsgCNoop, 4) == 0) {
     // discard no-ops
-    LOG_VERBOSE("no-op from", getName().c_str());
+    LOG_VERBOSE("no-op from %s", getName().c_str());
     return true;
   } else if (memcmp(code, kMsgDInfo, 4) == 0) {
     // future messages get parsed by parseMessage
@@ -173,7 +182,7 @@ bool ClientProxy1_0::parseMessage(const uint8_t *code)
     return false;
   } else if (memcmp(code, kMsgCNoop, 4) == 0) {
     // discard no-ops
-    LOG_VERBOSE("no-op from", getName().c_str());
+    LOG_VERBOSE("no-op from %s", getName().c_str());
     return true;
   } else if (memcmp(code, kMsgCClipboard, 4) == 0) {
     return recvGrabClipboard();
@@ -197,6 +206,15 @@ void ClientProxy1_0::handleWriteError()
 
 void ClientProxy1_0::handleFlatline()
 {
+  if (m_hasActivity && m_heartbeatAlarm > 0.0) {
+    const double elapsed = Arch::time() - m_lastActivityTime;
+    ClientProxy1_0::removeHeartbeatTimer();
+    if (elapsed < m_heartbeatAlarm) {
+      m_heartbeatTimer = m_events->newOneShotTimer(m_heartbeatAlarm - elapsed, this);
+      return;
+    }
+  }
+
   // didn't get a heartbeat fast enough.  assume client is dead.
   LOG_DEBUG("client \"%s\" is dead", getName().c_str());
   disconnect();

@@ -14,7 +14,10 @@
 #include "arch/win32/XArchWindows.h"
 #include "base/Log.h"
 
+#include <atomic>
+#include <cmath>
 #include <malloc.h>
+#include <mutex>
 
 static const int s_family[] = {
     PF_UNSPEC,
@@ -37,10 +40,16 @@ static int(PASCAL FAR *ioctl_winsock)(SOCKET s, int cmd, void FAR *data);
 static int(PASCAL FAR *listen_winsock)(SOCKET s, int backlog);
 static u_short(PASCAL FAR *ntohs_winsock)(u_short v);
 static int(PASCAL FAR *recv_winsock)(SOCKET s, void FAR *buf, int len, int flags);
+static int(PASCAL FAR *recvfrom_winsock)(
+    SOCKET s, void FAR *buf, int len, int flags, struct sockaddr FAR *from, int FAR *fromlen
+);
 static int(PASCAL FAR *select_winsock)(
     int nfds, fd_set FAR *readfds, fd_set FAR *writefds, fd_set FAR *exceptfds, const struct timeval FAR *timeout
 );
 static int(PASCAL FAR *send_winsock)(SOCKET s, const void FAR *buf, int len, int flags);
+static int(PASCAL FAR *sendto_winsock)(
+    SOCKET s, const void FAR *buf, int len, int flags, const struct sockaddr FAR *to, int tolen
+);
 static int(PASCAL FAR *setsockopt_winsock)(SOCKET s, int level, int optname, const void FAR *optval, int optlen);
 static int(PASCAL FAR *shutdown_winsock)(SOCKET s, int how);
 static SOCKET(PASCAL FAR *socket_winsock)(int af, int type, int protocol);
@@ -63,6 +72,61 @@ static int(PASCAL FAR *WSAEnumNetworkEvents_winsock)(SOCKET, WSAEVENT, LPWSANETW
 
 static HMODULE s_networkModule = nullptr;
 
+namespace {
+
+struct QosVersionWin32
+{
+  USHORT majorVersion;
+  USHORT minorVersion;
+};
+
+using QosCreateHandleFn = BOOL(WINAPI *)(QosVersionWin32 *version, PHANDLE qosHandle);
+using QosAddSocketToFlowFn =
+    BOOL(WINAPI *)(HANDLE qosHandle, SOCKET socket, PSOCKADDR destAddr, int trafficType, DWORD flags, DWORD *flowId);
+using QosRemoveSocketFromFlowFn = BOOL(WINAPI *)(HANDLE qosHandle, SOCKET socket, DWORD flowId, DWORD flags);
+using QosSetFlowFn = BOOL(WINAPI *)(
+    HANDLE qosHandle, DWORD flowId, int operation, ULONG size, PVOID buffer, DWORD flags, LPOVERLAPPED overlapped
+);
+
+constexpr int kQosTrafficTypeAudioVideo = 3;
+constexpr int kQosTrafficTypeVoice = 4;
+constexpr DWORD kQosNonAdaptiveFlow = 0x00000002;
+constexpr int kQosSetOutgoingDscpValue = 2;
+constexpr DWORD kDscpExpeditedForwarding = 46;
+
+std::once_flag s_qosInitFlag;
+HMODULE s_qwaveModule = nullptr;
+HANDLE s_qosHandle = nullptr;
+QosAddSocketToFlowFn s_qosAddSocketToFlow = nullptr;
+QosRemoveSocketFromFlowFn s_qosRemoveSocketFromFlow = nullptr;
+QosSetFlowFn s_qosSetFlow = nullptr;
+
+void initQwaveOnce()
+{
+  s_qwaveModule = ::LoadLibraryW(L"qwave.dll");
+  if (s_qwaveModule == nullptr) {
+    return;
+  }
+  auto createHandle = reinterpret_cast<QosCreateHandleFn>(::GetProcAddress(s_qwaveModule, "QOSCreateHandle"));
+  s_qosAddSocketToFlow = reinterpret_cast<QosAddSocketToFlowFn>(::GetProcAddress(s_qwaveModule, "QOSAddSocketToFlow"));
+  s_qosRemoveSocketFromFlow =
+      reinterpret_cast<QosRemoveSocketFromFlowFn>(::GetProcAddress(s_qwaveModule, "QOSRemoveSocketFromFlow"));
+  s_qosSetFlow = reinterpret_cast<QosSetFlowFn>(::GetProcAddress(s_qwaveModule, "QOSSetFlow"));
+
+  if (createHandle != nullptr && s_qosAddSocketToFlow != nullptr && s_qosRemoveSocketFromFlow != nullptr) {
+    QosVersionWin32 ver{1, 0};
+    if (!createHandle(&ver, &s_qosHandle)) {
+      s_qosHandle = nullptr;
+    }
+  }
+}
+
+std::atomic<uint64_t> s_nextInstanceId{1};
+thread_local WSAEVENT *tl_unblockEvent = nullptr;
+thread_local uint64_t tl_unblockInstanceId = 0;
+
+} // namespace
+
 static FARPROC netGetProcAddress(HMODULE module, LPCSTR name)
 {
   FARPROC func = ::GetProcAddress(module, name);
@@ -84,8 +148,16 @@ ArchNetAddressImpl *ArchNetAddressImpl::alloc(size_t size)
 // ArchNetworkWinsock
 //
 
+ArchNetworkWinsock::ArchNetworkWinsock() : m_instanceId(s_nextInstanceId.fetch_add(1, std::memory_order_relaxed))
+{
+}
+
 ArchNetworkWinsock::~ArchNetworkWinsock()
 {
+  if (tl_unblockInstanceId == m_instanceId) {
+    tl_unblockEvent = nullptr;
+    tl_unblockInstanceId = 0;
+  }
   if (s_networkModule != nullptr) {
     WSACleanup_winsock();
     ::FreeLibrary(s_networkModule);
@@ -162,12 +234,20 @@ void ArchNetworkWinsock::initModule(HMODULE module)
   setfunc(ntohs_winsock, ntohs, u_short(PASCAL FAR *)(u_short v));
   setfunc(recv_winsock, recv, int(PASCAL FAR *)(SOCKET s, void FAR *buf, int len, int flags));
   setfunc(
+      recvfrom_winsock, recvfrom,
+      int(PASCAL FAR *)(SOCKET s, void FAR *buf, int len, int flags, struct sockaddr FAR *from, int FAR *fromlen)
+  );
+  setfunc(
       select_winsock, select,
       int(PASCAL FAR *)(
           int nfds, fd_set FAR *readfds, fd_set FAR *writefds, fd_set FAR *exceptfds, const struct timeval FAR *timeout
       )
   );
   setfunc(send_winsock, send, int(PASCAL FAR *)(SOCKET s, const void FAR *buf, int len, int flags));
+  setfunc(
+      sendto_winsock, sendto,
+      int(PASCAL FAR *)(SOCKET s, const void FAR *buf, int len, int flags, const struct sockaddr FAR *to, int tolen)
+  );
   setfunc(
       setsockopt_winsock, setsockopt,
       int(PASCAL FAR *)(SOCKET s, int level, int optname, const void FAR *optval, int optlen)
@@ -203,10 +283,17 @@ ArchSocket ArchNetworkWinsock::newSocket(AddressFamily family, SocketType type)
   }
   try {
     setBlockingOnSocket(fd, false);
-    BOOL flag = 0;
-    int size = sizeof(flag);
-    if (setsockopt_winsock(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, size) == SOCKET_ERROR) {
-      throwError(getsockerror_winsock());
+    if (family == AddressFamily::INet6) {
+      BOOL flag = 0;
+      int size = sizeof(flag);
+      if (setsockopt_winsock(fd, IPPROTO_IPV6, IPV6_V6ONLY, &flag, size) == SOCKET_ERROR) {
+        throwError(getsockerror_winsock());
+      }
+    }
+    if (type == SocketType::DataGram) {
+      // Ignore ICMP Port Unreachable resets on UDP sockets (SIO_UDP_CONNRESET = _WSAIOW(IOC_VENDOR, 12) = 0x9800000C).
+      BOOL newBehavior = FALSE;
+      ioctl_winsock(fd, static_cast<int>(0x9800000Cu), &newBehavior);
     }
   } catch (...) {
     close_winsock(fd);
@@ -245,6 +332,10 @@ void ArchNetworkWinsock::closeSocket(ArchSocket s)
 
   // close the socket if necessary
   if (doClose) {
+    if (s->m_qosFlowId != 0 && s_qosHandle != nullptr && s_qosRemoveSocketFromFlow != nullptr) {
+      s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, s->m_qosFlowId, 0);
+      s->m_qosFlowId = 0;
+    }
     if (close_winsock(s->m_socket) == SOCKET_ERROR) {
       // close failed.  restore the last ref and throw.
       int err = getsockerror_winsock();
@@ -295,8 +386,7 @@ void ArchNetworkWinsock::listenOnSocket(ArchSocket s)
 {
   assert(s != nullptr);
 
-  // hardcoding backlog
-  if (listen_winsock(s->m_socket, 3) != ERROR_SUCCESS) {
+  if (listen_winsock(s->m_socket, SOMAXCONN) != ERROR_SUCCESS) {
     throwError(getsockerror_winsock());
   }
 }
@@ -420,31 +510,48 @@ int ArchNetworkWinsock::pollSocket(PollEntry pe[], int num, double timeout)
     return 0;
   }
 
-  // add the unblock event
-  ArchMultithreadWindows *mt = ArchMultithreadWindows::getInstance();
-  ArchThread thread = mt->newCurrentThread();
-  WSAEVENT *unblockEvent = (WSAEVENT *)mt->getNetworkDataForThread(thread);
-  ARCH->closeThread(thread);
+  // add the unblock event (cached in TLS per ArchNetworkWinsock instance to avoid per-poll mutex/list scans)
+  WSAEVENT *unblockEvent = (tl_unblockInstanceId == m_instanceId) ? tl_unblockEvent : nullptr;
   if (unblockEvent == nullptr) {
-    unblockEvent = new WSAEVENT;
-    m_unblockEvents.push_back(unblockEvent);
-    *unblockEvent = WSACreateEvent_winsock();
-    mt->setNetworkDataForCurrentThread(unblockEvent);
+    ArchMultithreadWindows *mt = ArchMultithreadWindows::getInstance();
+    ArchThread thread = mt->newCurrentThread();
+    unblockEvent = static_cast<WSAEVENT *>(mt->getNetworkDataForThread(thread));
+    ARCH->closeThread(thread);
+    if (unblockEvent == nullptr) {
+      unblockEvent = new WSAEVENT;
+      {
+        std::scoped_lock lock{m_mutex};
+        m_unblockEvents.push_back(unblockEvent);
+      }
+      *unblockEvent = WSACreateEvent_winsock();
+      mt->setNetworkDataForCurrentThread(unblockEvent);
+    }
+    tl_unblockEvent = unblockEvent;
+    tl_unblockInstanceId = m_instanceId;
   }
   events[n++] = *unblockEvent;
 
   // prepare timeout
-  DWORD t = (timeout < 0.0) ? INFINITE : (DWORD)(1000.0 * timeout);
+  DWORD t;
   if (canWrite) {
     // if we know we can write then don't block
+    t = 0;
+  } else if (timeout < 0.0) {
+    t = INFINITE;
+  } else if (timeout > 0.0) {
+    t = static_cast<DWORD>(std::ceil(1000.0 * timeout));
+  } else {
     t = 0;
   }
 
   // wait
   DWORD result = WSAWaitForMultipleEvents_winsock(n, events, FALSE, t, FALSE);
 
-  // reset the unblock event
-  WSAResetEvent_winsock(*unblockEvent);
+  // reset the unblock event only when it actually fired
+  if (result == WSA_WAIT_EVENT_0 + n - 1) {
+    WSAResetEvent_winsock(*unblockEvent);
+    return 0;
+  }
 
   // handle results
   if (result == WSA_WAIT_FAILED) {
@@ -456,10 +563,6 @@ int ArchNetworkWinsock::pollSocket(PollEntry pe[], int num, double timeout)
     throwError(getsockerror_winsock());
   }
   if (result == WSA_WAIT_TIMEOUT && !canWrite) {
-    return 0;
-  }
-  if (result == WSA_WAIT_EVENT_0 + n - 1) {
-    // the unblock event was signalled
     return 0;
   }
   for (i = 0, n = 0; i < num; ++i) {
@@ -556,6 +659,88 @@ size_t ArchNetworkWinsock::writeSocket(ArchSocket s, const void *buf, size_t len
     throwError(err);
   }
   return static_cast<size_t>(n);
+}
+
+size_t ArchNetworkWinsock::readDatagram(ArchSocket s, void *buf, size_t len, ArchNetAddress *fromAddr)
+{
+  assert(s != nullptr);
+
+  sockaddr_storage storage{};
+  int fromLen = sizeof(storage);
+  int n = recvfrom_winsock(
+      s->m_socket, buf, static_cast<int>(len), 0, reinterpret_cast<struct sockaddr *>(&storage), &fromLen
+  );
+  if (n == SOCKET_ERROR) {
+    if (fromAddr != nullptr) {
+      *fromAddr = nullptr;
+    }
+    const int err = getsockerror_winsock();
+    if (err == WSAEINTR || err == WSAEWOULDBLOCK || err == WSAECONNRESET || err == WSAEMSGSIZE) {
+      return 0;
+    }
+    throwError(err);
+  }
+
+  if (fromAddr != nullptr && fromLen > 0) {
+    ArchNetAddress addr = ArchNetAddressImpl::alloc(static_cast<size_t>(fromLen));
+    memcpy(&addr->m_addr, &storage, static_cast<size_t>(fromLen));
+    *fromAddr = addr;
+  }
+  return static_cast<size_t>(n);
+}
+
+size_t ArchNetworkWinsock::writeDatagram(ArchSocket s, const void *buf, size_t len, ArchNetAddress toAddr)
+{
+  assert(s != nullptr);
+  assert(toAddr != nullptr);
+
+  int n = sendto_winsock(
+      s->m_socket, buf, static_cast<int>(len), 0, TYPED_ADDR(const struct sockaddr, toAddr), toAddr->m_len
+  );
+  if (n == SOCKET_ERROR) {
+    const int err = getsockerror_winsock();
+    if (err == WSAEINTR || err == WSAEWOULDBLOCK || err == WSAENOBUFS) {
+      return 0;
+    }
+    throwError(err);
+  }
+  return static_cast<size_t>(n);
+}
+
+void ArchNetworkWinsock::setLowLatencyOnSocket(ArchSocket s, ArchNetAddress peer)
+{
+  if (s == nullptr) {
+    return;
+  }
+
+  // Best-effort DSCP EF (46 << 2 = 0xB8) for IPv4 and IPv6
+  const int tos = 0xB8;
+  setsockopt_winsock(s->m_socket, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+#ifdef IPV6_TCLASS
+  setsockopt_winsock(s->m_socket, IPPROTO_IPV6, IPV6_TCLASS, &tos, sizeof(tos));
+#endif
+
+  // Windows 10/11 NDIS + 802.11 WMM (AC_VO / AC_VI) hardware queue tagging via qWave
+  std::call_once(s_qosInitFlag, initQwaveOnce);
+  if (s_qosHandle != nullptr && s_qosAddSocketToFlow != nullptr) {
+    if (s->m_qosFlowId != 0 && s_qosRemoveSocketFromFlow != nullptr) {
+      s_qosRemoveSocketFromFlow(s_qosHandle, s->m_socket, s->m_qosFlowId, 0);
+      s->m_qosFlowId = 0;
+    }
+
+    PSOCKADDR dest = (peer != nullptr) ? TYPED_ADDR(struct sockaddr, peer) : nullptr;
+    DWORD flowId = 0;
+    if (!s_qosAddSocketToFlow(s_qosHandle, s->m_socket, dest, kQosTrafficTypeVoice, kQosNonAdaptiveFlow, &flowId)) {
+      s_qosAddSocketToFlow(s_qosHandle, s->m_socket, dest, kQosTrafficTypeAudioVideo, kQosNonAdaptiveFlow, &flowId);
+    }
+    if (flowId != 0) {
+      s->m_qosFlowId = flowId;
+      if (s_qosSetFlow != nullptr) {
+        DWORD dscp = kDscpExpeditedForwarding;
+        s_qosSetFlow(s_qosHandle, flowId, kQosSetOutgoingDscpValue, sizeof(dscp), &dscp, 0, nullptr);
+      }
+    }
+  }
 }
 
 void ArchNetworkWinsock::resetPollWriteOnSocket(ArchSocket s)
@@ -672,25 +857,20 @@ std::vector<ArchNetAddress> ArchNetworkWinsock::nameToAddr(const std::string &na
   std::vector<ArchNetAddressImpl *> addresses;
 
   struct addrinfo hints;
-  struct addrinfo *pResult;
+  struct addrinfo *pResult = nullptr;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
   int ret = -1;
 
-  std::scoped_lock lock{m_mutex};
   if ((ret = getaddrinfo(name.c_str(), nullptr, &hints, &pResult)) != 0) {
     throwNameError(ret);
   }
 
   for (auto address = pResult; address != nullptr; address = address->ai_next) {
-    addresses.push_back(new ArchNetAddressImpl);
-    if (address->ai_family == AF_INET) {
-      addresses.back()->m_len = (socklen_t)sizeof(struct sockaddr_in);
-    } else {
-      addresses.back()->m_len = (socklen_t)sizeof(struct sockaddr_in6);
-    }
-
-    memcpy(&addresses.back()->m_addr, address->ai_addr, addresses.back()->m_len);
+    const size_t addrLen = (address->ai_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+    auto *allocated = ArchNetAddressImpl::alloc(addrLen);
+    memcpy(&allocated->m_addr, address->ai_addr, addrLen);
+    addresses.push_back(allocated);
   }
 
   freeaddrinfo(pResult);
@@ -818,7 +998,7 @@ bool ArchNetworkWinsock::isAnyAddr(ArchNetAddress addr)
   case AddressFamily::INet6: {
     struct sockaddr_in6 *ipAddr = TYPED_ADDR(struct sockaddr_in6, addr);
     return (
-        addr->m_len == sizeof(struct sockaddr_in) && memcmp(&ipAddr->sin6_addr, &in6addr_any, sizeof(in6addr_any)) == 0
+        addr->m_len == sizeof(struct sockaddr_in6) && memcmp(&ipAddr->sin6_addr, &in6addr_any, sizeof(in6addr_any)) == 0
     );
   }
 

@@ -102,6 +102,12 @@ public:
   */
   virtual uint32_t getSize() const = 0;
 
+  //! Get conservative estimate of queued outbound bytes
+  virtual uint32_t getOutputSize() const
+  {
+    return 0;
+  }
+
   //@}
 };
 

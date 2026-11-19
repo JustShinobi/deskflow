@@ -10,6 +10,7 @@
 #include "deskflow/ProtocolTypes.h"
 
 #include <cstring>
+#include <vector>
 
 //
 // PacketStreamFilter
@@ -68,16 +69,29 @@ uint32_t PacketStreamFilter::read(void *buffer, uint32_t n)
 
 void PacketStreamFilter::write(const void *buffer, uint32_t count)
 {
-  // write the length of the payload
-  uint8_t length[4];
-  length[0] = (uint8_t)((count >> 24) & 0xff);
-  length[1] = (uint8_t)((count >> 16) & 0xff);
-  length[2] = (uint8_t)((count >> 8) & 0xff);
-  length[3] = (uint8_t)(count & 0xff);
-  getStream()->write(length, sizeof(length));
+  // Emit the 4-byte big-endian length prefix and payload in a single write()
+  // so TCP_NODELAY / SecureSocket never split one message across two segments
+  // or two TLS records and SocketMultiplexer wakes only once.
+  uint8_t stackFrame[132];
+  if (count <= sizeof(stackFrame) - 4) {
+    stackFrame[0] = static_cast<uint8_t>((count >> 24) & 0xff);
+    stackFrame[1] = static_cast<uint8_t>((count >> 16) & 0xff);
+    stackFrame[2] = static_cast<uint8_t>((count >> 8) & 0xff);
+    stackFrame[3] = static_cast<uint8_t>(count & 0xff);
+    if (count != 0) {
+      std::memcpy(stackFrame + 4, buffer, count);
+    }
+    getStream()->write(stackFrame, 4 + count);
+    return;
+  }
 
-  // write the payload
-  getStream()->write(buffer, count);
+  std::vector<uint8_t> heapFrame(4 + static_cast<size_t>(count));
+  heapFrame[0] = static_cast<uint8_t>((count >> 24) & 0xff);
+  heapFrame[1] = static_cast<uint8_t>((count >> 16) & 0xff);
+  heapFrame[2] = static_cast<uint8_t>((count >> 8) & 0xff);
+  heapFrame[3] = static_cast<uint8_t>(count & 0xff);
+  std::memcpy(heapFrame.data() + 4, buffer, count);
+  getStream()->write(heapFrame.data(), 4 + count);
 }
 
 void PacketStreamFilter::shutdownInput()

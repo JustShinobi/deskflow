@@ -21,6 +21,7 @@
 #include <WinSock2.h>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <cstdint>
 #include <list>
 #include <mutex>
 
@@ -35,6 +36,7 @@ public:
   int m_refCount;
   WSAEVENT m_event;
   bool m_pollWrite;
+  DWORD m_qosFlowId = 0;
 };
 
 class ArchNetAddressImpl
@@ -53,7 +55,7 @@ public:
 class ArchNetworkWinsock : public IArchNetwork
 {
 public:
-  ArchNetworkWinsock() = default;
+  ArchNetworkWinsock();
   ~ArchNetworkWinsock() override;
 
   void init() override;
@@ -72,6 +74,9 @@ public:
   void unblockPollSocket(ArchThread thread) override;
   size_t readSocket(ArchSocket s, void *buf, size_t len) override;
   size_t writeSocket(ArchSocket s, const void *buf, size_t len) override;
+  size_t readDatagram(ArchSocket s, void *buf, size_t len, ArchNetAddress *fromAddr) override;
+  size_t writeDatagram(ArchSocket s, const void *buf, size_t len, ArchNetAddress toAddr) override;
+  void setLowLatencyOnSocket(ArchSocket s, ArchNetAddress peer = nullptr) override;
   void resetPollWriteOnSocket(ArchSocket s) override;
   void throwErrorOnSocket(ArchSocket) override;
   bool setNoDelayOnSocket(ArchSocket, bool noDelay) override;
@@ -101,4 +106,5 @@ private:
 
   std::mutex m_mutex;
   EventList m_unblockEvents;
+  uint64_t m_instanceId = 0;
 };
