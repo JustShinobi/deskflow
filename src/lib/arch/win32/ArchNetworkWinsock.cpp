@@ -462,6 +462,28 @@ bool ArchNetworkWinsock::connectSocket(ArchSocket s, ArchNetAddress addr)
   return true;
 }
 
+void ArchNetworkWinsock::initPollThread()
+{
+  WSAEVENT *unblockEvent = (tl_unblockInstanceId == m_instanceId) ? tl_unblockEvent : nullptr;
+  if (unblockEvent == nullptr) {
+    ArchMultithreadWindows *mt = ArchMultithreadWindows::getInstance();
+    ArchThread thread = mt->newCurrentThread();
+    unblockEvent = static_cast<WSAEVENT *>(mt->getNetworkDataForThread(thread));
+    ARCH->closeThread(thread);
+    if (unblockEvent == nullptr) {
+      unblockEvent = new WSAEVENT;
+      *unblockEvent = WSACreateEvent_winsock();
+      {
+        std::scoped_lock lock{m_mutex};
+        m_unblockEvents.push_back(unblockEvent);
+      }
+      mt->setNetworkDataForCurrentThread(unblockEvent);
+    }
+    tl_unblockEvent = unblockEvent;
+    tl_unblockInstanceId = m_instanceId;
+  }
+}
+
 int ArchNetworkWinsock::pollSocket(PollEntry pe[], int num, double timeout)
 {
   int i;

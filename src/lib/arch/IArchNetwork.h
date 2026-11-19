@@ -168,6 +168,11 @@ public:
   */
   virtual bool connectSocket(ArchSocket s, ArchNetAddress addr) = 0;
 
+  //! Pre-initialize per-thread poll wakeup primitives on a dedicated multiplexer thread
+  virtual void initPollThread()
+  {
+  }
+
   //! Check socket state
   /*!
   Tests the state of \c num sockets for readability and/or writability.

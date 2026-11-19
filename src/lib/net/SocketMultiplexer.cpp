@@ -30,14 +30,21 @@ std::atomic<SocketMultiplexer *> s_instance{nullptr};
 
 SocketMultiplexer::SocketMultiplexer()
     : m_mutex(new Mutex),
+      m_threadReady(new CondVar<bool>(m_mutex, false)),
       m_jobsReady(new CondVar<bool>(m_mutex, false)),
       m_jobListLock(new CondVar<bool>(m_mutex, false)),
       m_jobListLockLocked(new CondVar<bool>(m_mutex, false))
 {
   s_instance.store(this, std::memory_order_release);
-  // start thread
+  // start thread and wait until its poll wakeup handle/pipe is registered
   auto tMethodJob = new TMethodJob<SocketMultiplexer>(this, &SocketMultiplexer::serviceThread);
   m_thread = new Thread(tMethodJob);
+  {
+    Lock lock(m_mutex);
+    while (!*m_threadReady) {
+      m_threadReady->wait();
+    }
+  }
 }
 
 SocketMultiplexer::~SocketMultiplexer()
@@ -46,8 +53,14 @@ SocketMultiplexer::~SocketMultiplexer()
   s_instance.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
   m_thread->cancel();
   m_thread->unblockPollSocket();
+  {
+    Lock lock(m_mutex);
+    *m_jobsReady = true;
+    m_jobsReady->broadcast();
+  }
   m_thread->wait();
   delete m_thread;
+  delete m_threadReady;
   delete m_jobsReady;
   delete m_jobListLock;
   delete m_jobListLockLocked;
@@ -126,6 +139,13 @@ void SocketMultiplexer::removeSocket(ISocket *socket)
 
 [[noreturn]] void SocketMultiplexer::serviceThread(const void *)
 {
+  ARCH->initPollThread();
+  {
+    Lock lock(m_mutex);
+    *m_threadReady = true;
+    m_threadReady->broadcast();
+  }
+
   std::vector<IArchNetwork::PollEntry> pfds;
   IArchNetwork::PollEntry pfd;
 

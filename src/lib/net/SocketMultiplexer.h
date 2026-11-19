@@ -78,6 +78,7 @@ private:
   Mutex *m_mutex = nullptr;
   Thread *m_thread = nullptr;
   bool m_update = false;
+  CondVar<bool> *m_threadReady = nullptr;
   CondVar<bool> *m_jobsReady = nullptr;
   CondVar<bool> *m_jobListLock = nullptr;
   CondVar<bool> *m_jobListLockLocked = nullptr;

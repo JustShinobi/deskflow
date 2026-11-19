@@ -241,6 +241,11 @@ bool ArchNetworkBSD::connectSocket(ArchSocket s, ArchNetAddress addr)
   return true;
 }
 
+void ArchNetworkBSD::initPollThread()
+{
+  (void)getUnblockPipe();
+}
+
 int ArchNetworkBSD::pollSocket(PollEntry pe[], int num, double timeout)
 {
   assert((pe != nullptr && num > 0) || num == 0);
@@ -288,9 +293,13 @@ int ArchNetworkBSD::pollSocket(PollEntry pe[], int num, double timeout)
   if (n > 0 && unblockPipe != nullptr && (pfd[num].revents & POLLIN) != 0) {
     // the unblock event was signalled.  flush the pipe.
     char dummy[100];
-    do {
-      m_pDeps->read(unblockPipe[0], dummy, sizeof(dummy));
-    } while (errno != EAGAIN);
+    while (true) {
+      errno = 0;
+      const ssize_t r = m_pDeps->read(unblockPipe[0], dummy, sizeof(dummy));
+      if (r <= 0 && errno != EINTR) {
+        break;
+      }
+    }
 
     // don't count this unblock pipe in return value
     --n;
@@ -759,22 +768,17 @@ const int *ArchNetworkBSD::getUnblockPipe()
 {
   ArchMultithreadPosix *mt = ArchMultithreadPosix::getInstance();
   ArchThread thread = mt->newCurrentThread();
-  const int *p = getUnblockPipeForThread(thread);
-  ARCH->closeThread(thread);
-  return p;
-}
-
-const int *ArchNetworkBSD::getUnblockPipeForThread(ArchThread thread)
-{
-  ArchMultithreadPosix *mt = ArchMultithreadPosix::getInstance();
   auto *unblockPipe = static_cast<int *>(mt->getNetworkDataForThread(thread));
   if (unblockPipe == nullptr) {
     unblockPipe = new int[2];
     if (pipe(unblockPipe) != -1) {
       try {
         setBlockingOnSocket(unblockPipe[0], false);
+        setBlockingOnSocket(unblockPipe[1], false);
         mt->setNetworkDataForCurrentThread(unblockPipe);
       } catch (...) {
+        close(unblockPipe[0]);
+        close(unblockPipe[1]);
         delete[] unblockPipe;
         unblockPipe = nullptr;
       }
@@ -783,7 +787,14 @@ const int *ArchNetworkBSD::getUnblockPipeForThread(ArchThread thread)
       unblockPipe = nullptr;
     }
   }
+  ARCH->closeThread(thread);
   return unblockPipe;
+}
+
+const int *ArchNetworkBSD::getUnblockPipeForThread(ArchThread thread)
+{
+  ArchMultithreadPosix *mt = ArchMultithreadPosix::getInstance();
+  return static_cast<const int *>(mt->getNetworkDataForThread(thread));
 }
 
 [[noreturn]] void ArchNetworkBSD::throwError(int err) const
