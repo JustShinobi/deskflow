@@ -213,8 +213,9 @@ size_t Server::getMaximumClipboardSizeBytes() const
 void Server::setListener(ClientListener *p)
 {
   m_clientListener = p;
-  if (p != nullptr && SocketMultiplexer::getInstance() != nullptr) {
-    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, SocketMultiplexer::getInstance());
+  SocketMultiplexer *multiplexer = (p != nullptr) ? p->getSocketMultiplexer() : nullptr;
+  if (p != nullptr && multiplexer != nullptr) {
+    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, multiplexer);
     m_udpChannel->openServer(p->getAddress());
   } else if (m_udpChannel != nullptr) {
     m_udpChannel->close();

@@ -103,11 +103,16 @@ jobs:
           }
           $info | ConvertTo-Json -Depth 5 | Set-Content fork-build-info/buildinfo.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: "${{ !cancelled() }}"
+        if: success()
         with:
           name: deskflow-fork-upstream-win-x64
           path: |
             build/*.msi
             fork-build-info/*.json
-            build/src/unittests/Testing/Temporary/*.log
           if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: failure()
+        with:
+          name: deskflow-fork-upstream-win-x64-test-logs
+          path: build/src/unittests/Testing/Temporary/*.log
+          if-no-files-found: ignore

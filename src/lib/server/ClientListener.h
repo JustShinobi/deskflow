@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "net/ISocketFactory.h"
 #include "net/SecurityLevel.h"
 #include "server/Config.h"
 
@@ -67,6 +68,12 @@ public:
   const NetworkAddress &getAddress() const
   {
     return m_address;
+  }
+
+  //! Get socket multiplexer owned by the listener's socket factory
+  SocketMultiplexer *getSocketMultiplexer() const
+  {
+    return m_socketFactory ? m_socketFactory->getSocketMultiplexer() : nullptr;
   }
   //@}
 

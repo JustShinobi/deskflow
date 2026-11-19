@@ -371,9 +371,10 @@ void Client::setOptions(const OptionsList &options)
     }
   }
 
-  if (udpPort != 0 && udpClientId != 0 && udpKeyMask == 0x0fu && SocketMultiplexer::getInstance() != nullptr) {
+  SocketMultiplexer *multiplexer = (m_socketFactory != nullptr) ? m_socketFactory->getSocketMultiplexer() : nullptr;
+  if (udpPort != 0 && udpClientId != 0 && udpKeyMask == 0x0fu && multiplexer != nullptr) {
     cleanupUdpChannel();
-    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, SocketMultiplexer::getInstance());
+    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, multiplexer);
     m_events->addHandler(EventTypes::StreamInputReady, m_udpChannel->getEventTarget(), [this](const auto &) {
       handleUdpMotion();
     });

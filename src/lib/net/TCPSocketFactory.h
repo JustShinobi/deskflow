@@ -30,6 +30,10 @@ public:
       IArchNetwork::AddressFamily family = IArchNetwork::AddressFamily::INet,
       SecurityLevel securityLevel = SecurityLevel::PlainText
   ) const override;
+  SocketMultiplexer *getSocketMultiplexer() const override
+  {
+    return m_socketMultiplexer;
+  }
 
 private:
   IEventQueue *m_events;

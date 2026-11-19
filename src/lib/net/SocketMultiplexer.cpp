@@ -17,7 +17,12 @@
 #include "mt/Thread.h"
 #include "net/ISocketMultiplexerJob.h"
 
+#include <atomic>
 #include <vector>
+
+namespace {
+std::atomic<SocketMultiplexer *> s_instance{nullptr};
+} // namespace
 
 //
 // SocketMultiplexer
@@ -29,6 +34,7 @@ SocketMultiplexer::SocketMultiplexer()
       m_jobListLock(new CondVar<bool>(m_mutex, false)),
       m_jobListLockLocked(new CondVar<bool>(m_mutex, false))
 {
+  s_instance.store(this, std::memory_order_release);
   // start thread
   auto tMethodJob = new TMethodJob<SocketMultiplexer>(this, &SocketMultiplexer::serviceThread);
   m_thread = new Thread(tMethodJob);
@@ -36,6 +42,8 @@ SocketMultiplexer::SocketMultiplexer()
 
 SocketMultiplexer::~SocketMultiplexer()
 {
+  SocketMultiplexer *expected = this;
+  s_instance.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
   m_thread->cancel();
   m_thread->unblockPollSocket();
   m_thread->wait();
@@ -49,6 +57,11 @@ SocketMultiplexer::~SocketMultiplexer()
   for (auto i = m_socketJobMap.begin(); i != m_socketJobMap.end(); ++i) {
     delete *(i->second);
   }
+}
+
+SocketMultiplexer *SocketMultiplexer::getInstance()
+{
+  return s_instance.load(std::memory_order_acquire);
 }
 
 void SocketMultiplexer::addSocket(ISocket *socket, ISocketMultiplexerJob *job)

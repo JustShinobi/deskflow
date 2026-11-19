@@ -13,6 +13,7 @@
 
 class IDataSocket;
 class IListenSocket;
+class SocketMultiplexer;
 
 //! Socket factory
 /*!
@@ -37,6 +38,12 @@ public:
       IArchNetwork::AddressFamily family = IArchNetwork::AddressFamily::INet,
       SecurityLevel securityLevel = SecurityLevel::PlainText
   ) const = 0;
+
+  //! Return the underlying SocketMultiplexer when available
+  virtual SocketMultiplexer *getSocketMultiplexer() const
+  {
+    return nullptr;
+  }
 
   //@}
 };
