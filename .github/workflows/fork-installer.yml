@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
+# SPDX-License-Identifier: MIT
+name: Fork Upstream Build & Installer
+
+on:
+  push:
+    branches: [fork/upstream]
+  workflow_dispatch:
+
+concurrency:
+  group: fork-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: REUSE Compliance Check
+        uses: fsfe/reuse-action@v5
+      - name: Clang-Format Check
+        uses: ./.github/actions/lint-clang
+
+  linux-x64:
+    runs-on: ubuntu-latest
+    container: debian:stable-slim
+    timeout-minutes: 25
+    steps:
+      - name: Install Git on Container
+        shell: bash
+        run: apt update -qqq > /dev/null && apt install -qqq git devscripts -y > /dev/null
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/install-dependencies
+        with:
+          like: debian
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Unit Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure --timeout 180
+
+  windows-x64-msi:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: amd64
+          spectre: true
+      - uses: ./.github/actions/install-dependencies
+        id: deps
+        with:
+          qt-version: '6.12'
+          vcpkg-triplet: x64-windows-release
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_INSTALLER=ON -DSKIP_BUILD_TESTS=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON ${{ steps.deps.outputs.vcpkg-cmake-config }}
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Unit Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build/src/unittests --output-on-failure --timeout 180
+      - name: Package MSI
+        run: cpack --config build/CPackConfig.cmake -G WIX -B build
+      - name: Record Build Metadata
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          New-Item -ItemType Directory fork-build-info -Force | Out-Null
+          $msi = Get-ChildItem build -Filter '*.msi' | Select-Object -First 1
+          if (!$msi) { throw 'MSI was not generated' }
+          $payload = @{}
+          foreach ($name in @('deskflow.exe','deskflow-core.exe','deskflow-daemon.exe')) {
+            $payload[$name] = (Get-FileHash (Join-Path 'build/bin' $name) -Algorithm SHA256).Hash
+          }
+          $info = @{
+            sourceCommit = $env:COMMIT_SHA
+            msiName = $msi.Name
+            msiSha256 = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash
+            binarySha256 = $payload
+          }
+          $info | ConvertTo-Json -Depth 5 | Set-Content fork-build-info/buildinfo.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deskflow-fork-upstream-win-x64
+          path: |
+            build/*.msi
+            fork-build-info/*.json
+            build/src/unittests/Testing/Temporary/*.log
+          if-no-files-found: error
