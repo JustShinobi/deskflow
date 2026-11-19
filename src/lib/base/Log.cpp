@@ -40,7 +40,7 @@ namespace {
 
 LogLevel::Level getPriority(const char *&fmt)
 {
-  if (strnlen(fmt, SIZE_MAX) < kPriorityPrefixLength) {
+  if (fmt == nullptr || fmt[0] == '\0' || fmt[1] == '\0' || fmt[2] == '\0') {
     throw std::invalid_argument("invalid format string, too short");
   }
 
@@ -56,8 +56,6 @@ std::vector<char> makeMessage(const char *filename, int lineNumber, const char *
 
   // base size includes null terminator, colon, space, etc.
   const int baseSize = 10;
-
-  const auto currentPriority = static_cast<int>(priority);
 
   auto timeStr = QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toStdString();
 
@@ -142,9 +140,6 @@ Log *Log::getInstance()
 
 void Log::print(const char *file, int line, const char *fmt, ...)
 {
-  const int initBufferSize = 1024;
-  const int bufferResizeScale = 2;
-
   const auto priority = getPriority(fmt);
   fmt += kPriorityPrefixLength;
 
@@ -152,27 +147,30 @@ void Log::print(const char *file, int line, const char *fmt, ...)
     return;
   }
 
-  std::vector<char> buffer(initBufferSize);
-  auto length = static_cast<int>(buffer.size());
+  char stackBuffer[1024];
+  va_list args;
+  va_start(args, fmt);
+  const int needed = vsnprintf(stackBuffer, sizeof(stackBuffer), fmt, args);
+  va_end(args);
 
-  while (true) {
-    va_list args;
+  if (needed < 0) {
+    return;
+  }
+
+  const char *formatted = stackBuffer;
+  std::vector<char> heapBuffer;
+  if (static_cast<size_t>(needed) >= sizeof(stackBuffer)) {
+    heapBuffer.resize(static_cast<size_t>(needed) + 1);
     va_start(args, fmt);
-    int n = vsnprintf(buffer.data(), length, fmt, args);
+    vsnprintf(heapBuffer.data(), heapBuffer.size(), fmt, args);
     va_end(args);
-
-    if (n < 0 || n > length) {
-      length *= bufferResizeScale;
-      buffer.resize(length);
-    } else {
-      break;
-    }
+    formatted = heapBuffer.data();
   }
 
   if (priority == LogLevel::Level::Print) {
-    output(priority, buffer.data());
+    output(priority, formatted);
   } else {
-    auto message = makeMessage(file, line, buffer.data(), priority);
+    auto message = makeMessage(file, line, formatted, priority);
     output(priority, message.data());
   }
 }
@@ -219,14 +217,7 @@ bool Log::setFilter(const QString &maxPriority)
 
 void Log::setFilter(LogLevel::Level maxPriority)
 {
-  std::scoped_lock lock{m_mutex};
-  m_maxPriority = maxPriority;
-}
-
-LogLevel::Level Log::getFilter() const
-{
-  std::scoped_lock lock{m_mutex};
-  return m_maxPriority;
+  m_maxPriority.store(maxPriority, std::memory_order_relaxed);
 }
 
 void Log::output(LogLevel::Level priority, const char *msg)
@@ -235,20 +226,15 @@ void Log::output(LogLevel::Level priority, const char *msg)
   if (!msg)
     return;
 
+  const QString qmsg = QString::fromUtf8(msg);
   std::scoped_lock lock{m_mutex};
 
-  OutputterList::const_iterator i;
-
-  for (i = m_alwaysOutputters.begin(); i != m_alwaysOutputters.end(); ++i) {
-
-    // write to outputter
-    (*i)->write(priority, msg);
+  for (auto *outputter : m_alwaysOutputters) {
+    outputter->write(priority, qmsg);
   }
 
-  for (i = m_outputters.begin(); i != m_outputters.end(); ++i) {
-
-    // write to outputter and break out of loop if it returns false
-    if (!(*i)->write(priority, msg)) {
+  for (auto *outputter : m_outputters) {
+    if (!outputter->write(priority, qmsg)) {
       break;
     }
   }

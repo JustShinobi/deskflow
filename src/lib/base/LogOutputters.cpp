@@ -53,11 +53,14 @@ void ConsoleLogOutputter::close()
 bool ConsoleLogOutputter::write(LogLevel::Level level, const QString &msg)
 {
   using enum LogLevel::Level;
-  if ((level >= Fatal) && (level <= Warning))
-    std::cerr << qPrintable(msg) << std::endl;
-  else
-    std::cout << qPrintable(msg) << std::endl;
-  std::cout.flush();
+  const QByteArray local = msg.toLocal8Bit();
+  if ((level >= Fatal) && (level <= Warning)) {
+    std::cerr.write(local.constData(), local.size());
+    std::cerr << std::endl;
+  } else {
+    std::cout.write(local.constData(), local.size());
+    std::cout << std::endl;
+  }
   return true;
 }
 
@@ -121,22 +124,43 @@ FileLogOutputter::FileLogOutputter(const QString &logFile)
   setLogFilename(logFile);
 }
 
+FileLogOutputter::~FileLogOutputter()
+{
+  close();
+}
+
 void FileLogOutputter::setLogFilename(const QString &logFile)
 {
   assert(logFile != nullptr);
+  if (m_fileName == logFile) {
+    return;
+  }
+  close();
   m_fileName = logFile;
 }
 
 bool FileLogOutputter::write(LogLevel::Level, const QString &message)
 {
-  QFile file(m_fileName);
-  if (!file.open(QFile::WriteOnly | QFile::Append))
+  if (!m_file.isOpen()) {
+    m_file.setFileName(m_fileName);
+    if (!m_file.open(QFile::WriteOnly | QFile::Append)) {
+      return false;
+    }
+    m_currentSize = m_file.size();
+  }
+
+  QByteArray payload = message.toUtf8();
+  payload.append('\n');
+  const qint64 written = m_file.write(payload);
+  if (written < 0) {
+    close();
     return false;
+  }
+  m_file.flush();
+  m_currentSize += written;
 
-  QTextStream(&file) << message << Qt::endl;
-  file.close();
-
-  if (file.size() > s_logFileSizeLimit) {
+  if (m_currentSize > s_logFileSizeLimit) {
+    close();
     const auto oldFile = QStringLiteral("%1.1").arg(m_fileName);
     QFile::remove(oldFile);
     QFile::rename(m_fileName, oldFile);
@@ -145,12 +169,15 @@ bool FileLogOutputter::write(LogLevel::Level, const QString &message)
   return true;
 }
 
-void FileLogOutputter::open(const QString &title)
+void FileLogOutputter::open(const QString &)
 {
-  // do nothing
+  // opened lazily on first write
 }
 
 void FileLogOutputter::close()
 {
-  // do nothing
+  if (m_file.isOpen()) {
+    m_file.close();
+  }
+  m_currentSize = 0;
 }

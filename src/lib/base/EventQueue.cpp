@@ -52,17 +52,20 @@ EventQueue::~EventQueue()
 int EventQueue::loop()
 {
   m_buffer->init();
+  std::queue<Event> pending;
   {
     Lock lock(m_readyMutex);
     *m_readyCondVar = true;
+    m_isReady.store(true, std::memory_order_release);
+    pending.swap(m_pending);
     m_readyCondVar->signal();
   }
   LOG_DEBUG("event queue is ready");
-  while (!m_pending.empty()) {
+  while (!pending.empty()) {
     LOG_DEBUG("add pending events to buffer");
-    Event &event = m_pending.front();
+    Event &event = pending.front();
     addEventToBuffer(std::move(event));
-    m_pending.pop();
+    pending.pop();
   }
 
   Event event;
@@ -85,16 +88,24 @@ void EventQueue::adoptBuffer(IEventQueueBuffer *buffer)
 
   LOG_DEBUG("adopting new buffer");
 
-  if (m_events.size() != 0) {
+  size_t activeEvents = 0;
+  for (const auto &slot : m_events) {
+    if (slot.has_value()) {
+      ++activeEvents;
+    }
+  }
+  if (activeEvents != 0) {
     // this can come as a nasty surprise to programmers expecting
     // their events to be raised, only to have them deleted.
-    LOG_DEBUG("discarding %d event(s)", m_events.size());
+    LOG_DEBUG("discarding %zu event(s)", activeEvents);
   }
 
   // discard old buffer and old events
   m_buffer.reset();
-  for (auto i = m_events.begin(); i != m_events.end(); ++i) {
-    Event::deleteData(i->second);
+  for (auto &slot : m_events) {
+    if (slot.has_value()) {
+      Event::deleteData(*slot);
+    }
   }
   m_events.clear();
   m_oldEventIDs.clear();
@@ -108,57 +119,59 @@ void EventQueue::adoptBuffer(IEventQueueBuffer *buffer)
 
 bool EventQueue::processEvent(Event &event, double timeout, Stopwatch &timer)
 {
-  // if no events are waiting then handle timers and then wait
-  while (m_buffer->isEmpty()) {
-    // handle timers first
-    if (hasTimerExpired(event)) {
+  for (;;) {
+    // if no events are waiting then handle timers and then wait
+    while (m_buffer->isEmpty()) {
+      // handle timers first
+      if (hasTimerExpired(event)) {
+        return true;
+      }
+
+      // get time remaining in timeout
+      double timeLeft = -1.0;
+      if (timeout >= 0.0) {
+        timeLeft = timeout - timer.getTime();
+        if (timeLeft <= 0.0) {
+          return false;
+        }
+      }
+
+      // get time until next timer expires.  if there is a timer
+      // and it'll expire before the client's timeout then use
+      // that duration for our timeout instead.
+      if (double timerTimeout = getNextTimerTimeout();
+          timeout < 0.0 || (timerTimeout >= 0.0 && timerTimeout < timeLeft)) {
+        timeLeft = timerTimeout;
+      }
+
+      // wait for an event
+      m_buffer->waitForEvent(timeLeft);
+    }
+
+    // get the event
+    uint32_t dataID;
+    IEventQueueBuffer::Type type = m_buffer->getEvent(event, dataID);
+    switch (type) {
+      using enum IEventQueueBuffer::Type;
+    case Unknown:
+      if (timeout < 0.0 || timer.getTime() < timeout) {
+        continue;
+      }
+      return false;
+
+    case System:
+      return true;
+
+    case User: {
+      std::scoped_lock lock{m_mutex};
+      event = removeEvent(dataID);
       return true;
     }
 
-    // get time remaining in timeout
-    double timeLeft = timeout - timer.getTime();
-    if (timeout >= 0.0 && timeLeft <= 0.0) {
+    default:
+      assert(0 && "invalid event type");
       return false;
     }
-
-    // get time until next timer expires.  if there is a timer
-    // and it'll expire before the client's timeout then use
-    // that duration for our timeout instead.
-    if (double timerTimeout = getNextTimerTimeout();
-        timeout < 0.0 || (timerTimeout >= 0.0 && timerTimeout < timeLeft)) {
-      timeLeft = timerTimeout;
-    }
-
-    // wait for an event
-    m_buffer->waitForEvent(timeLeft);
-  }
-
-  // get the event
-  uint32_t dataID;
-  IEventQueueBuffer::Type type = m_buffer->getEvent(event, dataID);
-  switch (type) {
-    using enum IEventQueueBuffer::Type;
-  case Unknown:
-    if (timeout < 0.0 || timeout <= timer.getTime()) {
-      // don't want to fail if client isn't expecting that
-      // so if getEvent() fails with an infinite timeout
-      // then just try getting another event.
-      processEvent(event, timeout, timer);
-    }
-    return false;
-
-  case System:
-    return true;
-
-  case User: {
-    std::scoped_lock lock{m_mutex};
-    event = removeEvent(dataID);
-    return true;
-  }
-
-  default:
-    assert(0 && "invalid event type");
-    return false;
   }
 }
 
@@ -174,12 +187,8 @@ bool EventQueue::dispatchEvent(const Event &event)
   auto dispatch = [&] {
 #endif
     void *target = event.getTarget();
-    if (auto typeHandler = getHandler(event.getType(), target); typeHandler.has_value()) {
-      (*typeHandler)(event);
-      return true;
-    }
-    if (auto anyHandler = getHandler(EventTypes::Unknown, target); anyHandler.has_value()) {
-      (*anyHandler)(event);
+    if (auto handler = getHandler(event.getType(), target); handler.has_value()) {
+      (*handler)(event);
       return true;
     }
     return false;
@@ -205,24 +214,34 @@ void EventQueue::addEvent(Event &&event)
   if ((event.getFlags() & Event::EventFlags::DeliverImmediately) != 0) {
     dispatchEvent(event);
     Event::deleteData(event);
-  } else if (!(*m_readyCondVar)) {
-    m_pending.push(std::move(event));
-  } else {
-    addEventToBuffer(std::move(event));
+    return;
   }
+
+  if (!m_isReady.load(std::memory_order_acquire)) {
+    Lock lock(m_readyMutex);
+    if (!(*m_readyCondVar)) {
+      m_pending.push(std::move(event));
+      return;
+    }
+  }
+
+  addEventToBuffer(std::move(event));
 }
 
 void EventQueue::addEventToBuffer(Event &&event)
 {
-  std::scoped_lock lock{m_mutex};
+  uint32_t eventID;
+  {
+    std::scoped_lock lock{m_mutex};
+    eventID = saveEvent(std::move(event));
+  }
 
-  // store the event's data locally
-  auto eventID = saveEvent(std::move(event));
-
-  // add it
   if (!m_buffer->addEvent(eventID)) {
-    // failed to send event
-    auto removedEvent = removeEvent(eventID);
+    Event removedEvent;
+    {
+      std::scoped_lock lock{m_mutex};
+      removedEvent = removeEvent(eventID);
+    }
     Event::deleteData(removedEvent);
   }
 }
@@ -236,7 +255,6 @@ EventQueueTimer *EventQueue::newTimer(double duration, void *target)
     target = timer;
   }
   std::scoped_lock lock{m_mutex};
-  m_timers.insert(timer);
   // initial duration is requested duration plus whatever's on
   // the clock currently because the latter will be subtracted
   // the next time we check for timers.
@@ -253,7 +271,6 @@ EventQueueTimer *EventQueue::newOneShotTimer(double duration, void *target)
     target = timer;
   }
   std::scoped_lock lock{m_mutex};
-  m_timers.insert(timer);
   // initial duration is requested duration plus whatever's on
   // the clock currently because the latter will be subtracted
   // the next time we check for timers.
@@ -263,15 +280,14 @@ EventQueueTimer *EventQueue::newOneShotTimer(double duration, void *target)
 
 void EventQueue::deleteTimer(EventQueueTimer *timer)
 {
-  std::scoped_lock lock{m_mutex};
-  for (auto index = m_timerQueue.begin(); index != m_timerQueue.end(); ++index) {
-    if (index->getTimer() == timer) {
-      m_timerQueue.erase(index);
-      break;
+  {
+    std::scoped_lock lock{m_mutex};
+    for (auto index = m_timerQueue.begin(); index != m_timerQueue.end(); ++index) {
+      if (index->getTimer() == timer) {
+        m_timerQueue.erase(index);
+        break;
+      }
     }
-  }
-  if (Timers::iterator index = m_timers.find(timer); index != m_timers.end()) {
-    m_timers.erase(index);
   }
   delete timer;
 }
@@ -311,9 +327,13 @@ std::optional<EventQueue::EventHandler> EventQueue::getHandler(EventTypes type, 
   std::scoped_lock lock{m_mutex};
   if (HandlerTable::const_iterator index = m_handlers.find(target); index != m_handlers.end()) {
     const TypeHandlerTable &typeHandlers = index->second;
-    TypeHandlerTable::const_iterator index2 = typeHandlers.find(type);
-    if (index2 != typeHandlers.end()) {
+    if (TypeHandlerTable::const_iterator index2 = typeHandlers.find(type); index2 != typeHandlers.end()) {
       return index2->second;
+    }
+    if (type != EventTypes::Unknown) {
+      if (TypeHandlerTable::const_iterator any = typeHandlers.find(EventTypes::Unknown); any != typeHandlers.end()) {
+        return any->second;
+      }
     }
   }
   return std::nullopt;
@@ -321,35 +341,26 @@ std::optional<EventQueue::EventHandler> EventQueue::getHandler(EventTypes type, 
 
 uint32_t EventQueue::saveEvent(Event &&event)
 {
-  // choose id
   uint32_t id;
   if (!m_oldEventIDs.empty()) {
-    // reuse an id
     id = m_oldEventIDs.back();
     m_oldEventIDs.pop_back();
+    m_events[id] = std::move(event);
   } else {
-    // make a new id
     id = static_cast<uint32_t>(m_events.size());
+    m_events.emplace_back(std::move(event));
   }
-
-  // save data
-  m_events[id] = std::move(event);
   return id;
 }
 
 Event EventQueue::removeEvent(uint32_t eventID)
 {
-  // look up id
-  EventTable::iterator index = m_events.find(eventID);
-  if (index == m_events.end()) {
+  if (eventID >= m_events.size() || !m_events[eventID].has_value()) {
     return Event();
   }
 
-  // get data
-  Event event = std::move(index->second);
-  m_events.erase(index);
-
-  // save old id for reuse
+  Event event = std::move(*m_events[eventID]);
+  m_events[eventID].reset();
   m_oldEventIDs.push_back(eventID);
 
   return event;
@@ -357,9 +368,7 @@ Event EventQueue::removeEvent(uint32_t eventID)
 
 bool EventQueue::hasTimerExpired(Event &event)
 {
-  // return true if there's a timer in the timer priority queue that
-  // has expired.  if returning true then fill in event appropriately
-  // and reset and reinsert the timer.
+  std::scoped_lock lock{m_mutex};
   if (m_timerQueue.empty()) {
     return false;
   }
@@ -397,9 +406,7 @@ bool EventQueue::hasTimerExpired(Event &event)
 
 double EventQueue::getNextTimerTimeout() const
 {
-  // return -1 if no timers, 0 if the top timer has expired, otherwise
-  // the time until the top timer in the timer priority queue will
-  // expire.
+  std::scoped_lock lock{m_mutex};
   if (m_timerQueue.empty()) {
     return -1.0;
   }

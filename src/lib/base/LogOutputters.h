@@ -10,6 +10,7 @@
 
 #include "base/ILogOutputter.h"
 
+#include <QFile>
 #include <QString>
 //! Stop traversing log chain outputter
 /*!
@@ -57,7 +58,7 @@ class FileLogOutputter : public ILogOutputter
 {
 public:
   explicit FileLogOutputter(const QString &logFile);
-  ~FileLogOutputter() override = default;
+  ~FileLogOutputter() override;
 
   // ILogOutputter overrides
   void open(const QString &title) override;
@@ -68,6 +69,8 @@ public:
 
 private:
   QString m_fileName;
+  QFile m_file;
+  qint64 m_currentSize = 0;
 };
 
 //! Write log to system log

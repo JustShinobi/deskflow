@@ -341,7 +341,8 @@ void MSWindowsWatchdog::setProcessConfig(const std::string_view &command, bool e
 
 void MSWindowsWatchdog::outputLoop(const void *)
 {
-  static constexpr DWORD kBufSize = 4096;
+  static constexpr DWORD kBufSize = 16384;
+  static constexpr qsizetype kMaxPendingLine = 65536;
 
   BYTE raw[kBufSize];
   DWORD bytesRead = 0;
@@ -350,6 +351,16 @@ void MSWindowsWatchdog::outputLoop(const void *)
   // Using a byte decoder should help to prevent mojibake when we get a partial UTF-8 sequence in a read chunk.
   // In future when we move to Qt process APIs, this can all be simplified.
   QStringDecoder decoder(QStringDecoder::Utf8);
+  QString pending;
+
+  auto flushLine = [this](QString line) {
+    if (line.endsWith(QLatin1Char('\r'))) {
+      line.chop(1);
+    }
+    if (!line.isEmpty()) {
+      m_fileLogOutputter.write(LogLevel::Level::Print, line);
+    }
+  };
 
   while (m_running) {
     const BOOL ok = ::ReadFile(m_outputReadPipe, raw, kBufSize, &bytesRead, nullptr);
@@ -360,22 +371,32 @@ void MSWindowsWatchdog::outputLoop(const void *)
         LOG_WARN("could not read from output pipe, error: %s", windowsErrorToString(err).c_str());
       }
 
-      // Retry immediately when nothing to read or we get a transient error like ERROR_NO_DATA (pipe is non-blocking).
-      Arch::sleep(0.1);
+      Arch::sleep(0.02);
       continue;
     }
 
     const QString decoded =
         decoder.decode(QByteArray::fromRawData(reinterpret_cast<const char *>(raw), int(bytesRead)));
 
-    // The file log outputter adds its own newlines, so trim the decoded string to avoid double newlines.
-    const auto trimmed = decoded.trimmed();
-    m_fileLogOutputter.write(LogLevel::Level::Print, trimmed);
-
     if (m_foreground) {
-      // Doesn't add it's own newlines, so use the original ones from the process output.
       ::OutputDebugString(decoded.toStdWString().c_str());
     }
+
+    pending.append(decoded);
+    qsizetype newlinePos = pending.indexOf(QLatin1Char('\n'));
+    while (newlinePos >= 0) {
+      flushLine(pending.left(newlinePos));
+      pending.remove(0, newlinePos + 1);
+      newlinePos = pending.indexOf(QLatin1Char('\n'));
+    }
+    if (pending.size() > kMaxPendingLine) {
+      flushLine(pending);
+      pending.clear();
+    }
+  }
+
+  if (!pending.trimmed().isEmpty()) {
+    flushLine(pending.trimmed());
   }
 }
 
@@ -479,7 +500,8 @@ void MSWindowsWatchdog::initOutputReadPipe()
   saAttr.bInheritHandle = TRUE;
   saAttr.lpSecurityDescriptor = nullptr;
 
-  if (!CreatePipe(&m_outputReadPipe, &m_outputWritePipe, &saAttr, 0)) {
+  static constexpr DWORD kPipeBufferBytes = 262144;
+  if (!CreatePipe(&m_outputReadPipe, &m_outputWritePipe, &saAttr, kPipeBufferBytes)) {
     LOG_ERR("could not create output pipe");
     throw std::runtime_error(windowsErrorToString(GetLastError()));
   }

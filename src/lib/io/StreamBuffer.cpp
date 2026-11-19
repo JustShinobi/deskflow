@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -7,65 +8,46 @@
 
 #include "io/StreamBuffer.h"
 
-#include <assert.h>
+#include <algorithm>
+#include <cassert>
+#include <cstring>
 
 //
 // StreamBuffer
 //
 
-const uint32_t StreamBuffer::kChunkSize = 4096;
-
 const void *StreamBuffer::peek(uint32_t n)
 {
   assert(n <= m_size);
 
-  // if requesting no data then return nullptr so we don't try to access
-  // an empty list.
   if (n == 0) {
     return nullptr;
   }
 
-  // reserve space in first chunk
-  auto head = m_chunks.begin();
-  head->reserve(n + m_headUsed);
-
-  // consolidate chunks into the first chunk until it has n bytes
-  ChunkList::iterator scan = head;
-  ++scan;
-  while (head->size() - m_headUsed < n && scan != m_chunks.end()) {
-    head->insert(head->end(), scan->begin(), scan->end());
-    scan = m_chunks.erase(scan);
-  }
-
-  return static_cast<const void *>(&(head->begin()[m_headUsed]));
+  return static_cast<const void *>(m_data.data() + m_head);
 }
 
 void StreamBuffer::pop(uint32_t n)
 {
-  // discard all chunks if n is greater than or equal to m_size
   if (n >= m_size) {
+    m_head = 0;
     m_size = 0;
-    m_headUsed = 0;
-    m_chunks.clear();
+    m_data.clear();
+    if (m_data.capacity() > kMaxRetainedCapacity) {
+      std::vector<uint8_t> shrunk;
+      shrunk.reserve(kInitialCapacity);
+      m_data.swap(shrunk);
+    }
     return;
   }
 
-  // update size
+  m_head += n;
   m_size -= n;
 
-  // discard chunks until more than n bytes would've been discarded
-  auto scan = m_chunks.begin();
-  assert(scan != m_chunks.end());
-  while (scan->size() - m_headUsed <= n) {
-    n -= (uint32_t)scan->size() - m_headUsed;
-    m_headUsed = 0;
-    scan = m_chunks.erase(scan);
-    assert(scan != m_chunks.end());
-  }
-
-  // remove left over bytes from the head chunk
-  if (n > 0) {
-    m_headUsed += n;
+  if (m_head >= kCompactThreshold && m_head >= m_size) {
+    std::memmove(m_data.data(), m_data.data() + m_head, m_size);
+    m_data.resize(m_size);
+    m_head = 0;
   }
 }
 
@@ -73,46 +55,26 @@ void StreamBuffer::write(const void *vdata, uint32_t n)
 {
   assert(vdata != nullptr);
 
-  // ignore if no data, otherwise update size
   if (n == 0) {
     return;
   }
+
+  if (m_head > 0 && m_data.size() + n > m_data.capacity()) {
+    std::memmove(m_data.data(), m_data.data() + m_head, m_size);
+    m_data.resize(m_size);
+    m_head = 0;
+  }
+
+  const size_t required = m_data.size() + static_cast<size_t>(n);
+  if (required > m_data.capacity()) {
+    const size_t doubled = m_data.capacity() * 2;
+    m_data.reserve(std::max({kInitialCapacity, doubled, required}));
+  }
+
+  const size_t writeOffset = m_data.size();
+  m_data.resize(required);
+  std::memcpy(m_data.data() + writeOffset, vdata, n);
   m_size += n;
-
-  // cast data to bytes
-  const auto *data = static_cast<const uint8_t *>(vdata);
-
-  // point to last chunk if it has space, otherwise append an empty chunk
-  auto scan = m_chunks.end();
-  if (scan != m_chunks.begin()) {
-    --scan;
-    if (scan->size() >= kChunkSize) {
-      ++scan;
-    }
-  }
-  if (scan == m_chunks.end()) {
-    scan = m_chunks.emplace(scan, Chunk());
-  }
-
-  // append data in chunks
-  while (n > 0) {
-    // choose number of bytes for next chunk
-    assert(scan->size() <= kChunkSize);
-    uint32_t count = kChunkSize - (uint32_t)scan->size();
-    if (count > n)
-      count = n;
-
-    // transfer data
-    scan->insert(scan->end(), data, data + count);
-    n -= count;
-    data += count;
-
-    // append another empty chunk if we're not done yet
-    if (n > 0) {
-      ++scan;
-      scan = m_chunks.emplace(scan, Chunk());
-    }
-  }
 }
 
 uint32_t StreamBuffer::getSize() const

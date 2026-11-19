@@ -10,6 +10,7 @@
 
 #include "common/LogLevel.h"
 
+#include <atomic>
 #include <list>
 #include <mutex>
 
@@ -103,8 +104,11 @@ public:
   */
   void print(const char *file, int line, const char *format, ...);
 
-  //! Get the minimum priority level.
-  LogLevel::Level getFilter() const;
+  //! Get the minimum priority level (lock-free fast path).
+  LogLevel::Level getFilter() const noexcept
+  {
+    return m_maxPriority.load(std::memory_order_relaxed);
+  }
 
   //! Get the singleton instance of the log
   static Log *getInstance();
@@ -129,7 +133,7 @@ private:
   mutable std::mutex m_mutex;
   OutputterList m_outputters;
   OutputterList m_alwaysOutputters;
-  LogLevel::Level m_maxPriority;
+  std::atomic<LogLevel::Level> m_maxPriority{LogLevel::Level::Info};
 };
 
 /*!
@@ -212,10 +216,59 @@ otherwise it expands to a call that doesn't.
 #define CLOG_DEBUG CLOG_TRACE CLOG_TAG_DEBUG
 #define CLOG_VERBOSE CLOG_TRACE CLOG_TAG_VERBOSE
 
+#if defined(NOLOGGING)
+#define LOG_PRINT(...)                                                                                                 \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_CRIT(...)                                                                                                  \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_ERR(...)                                                                                                   \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_WARN(...)                                                                                                  \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_INFO(...)                                                                                                  \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_DEBUG(...)                                                                                                 \
+  do {                                                                                                                 \
+  } while (false)
+#define LOG_VERBOSE(...)                                                                                               \
+  do {                                                                                                                 \
+  } while (false)
+#else
 #define LOG_PRINT(...) LOG((CLOG_PRINT __VA_ARGS__))
 #define LOG_CRIT(...) LOG((CLOG_CRIT __VA_ARGS__))
-#define LOG_ERR(...) LOG((CLOG_ERR __VA_ARGS__))
-#define LOG_WARN(...) LOG((CLOG_WARN __VA_ARGS__))
-#define LOG_INFO(...) LOG((CLOG_INFO __VA_ARGS__))
-#define LOG_DEBUG(...) LOG((CLOG_DEBUG __VA_ARGS__))
-#define LOG_VERBOSE(...) LOG((CLOG_VERBOSE __VA_ARGS__))
+#define LOG_ERR(...)                                                                                                   \
+  do {                                                                                                                 \
+    if (CLOG->getFilter() >= LogLevel::Level::Error) {                                                                 \
+      LOG((CLOG_ERR __VA_ARGS__));                                                                                     \
+    }                                                                                                                  \
+  } while (false)
+#define LOG_WARN(...)                                                                                                  \
+  do {                                                                                                                 \
+    if (CLOG->getFilter() >= LogLevel::Level::Warning) {                                                               \
+      LOG((CLOG_WARN __VA_ARGS__));                                                                                    \
+    }                                                                                                                  \
+  } while (false)
+#define LOG_INFO(...)                                                                                                  \
+  do {                                                                                                                 \
+    if (CLOG->getFilter() >= LogLevel::Level::Info) {                                                                  \
+      LOG((CLOG_INFO __VA_ARGS__));                                                                                    \
+    }                                                                                                                  \
+  } while (false)
+#define LOG_DEBUG(...)                                                                                                 \
+  do {                                                                                                                 \
+    if (CLOG->getFilter() >= LogLevel::Level::Debug) {                                                                 \
+      LOG((CLOG_DEBUG __VA_ARGS__));                                                                                   \
+    }                                                                                                                  \
+  } while (false)
+#define LOG_VERBOSE(...)                                                                                               \
+  do {                                                                                                                 \
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {                                                               \
+      LOG((CLOG_VERBOSE __VA_ARGS__));                                                                                 \
+    }                                                                                                                  \
+  } while (false)
+#endif

@@ -13,12 +13,13 @@
 #include "base/Stopwatch.h"
 #include "mt/CondVar.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
-#include <set>
+#include <vector>
 
 //! Event queue
 /*!
@@ -93,9 +94,8 @@ private:
     double m_time;
   };
 
-  using Timers = std::set<EventQueueTimer *>;
   using TimerQueue = PriorityQueue<Timer>;
-  using EventTable = std::map<uint32_t, Event>;
+  using EventTable = std::vector<std::optional<Event>>;
   using EventIDList = std::vector<uint32_t>;
   using TypeHandlerTable = std::map<EventTypes, EventHandler>;
   using HandlerTable = std::map<void *, TypeHandlerTable>;
@@ -112,13 +112,13 @@ private:
 
   // timers
   Stopwatch m_time;
-  Timers m_timers;
   TimerQueue m_timerQueue;
   TimerEvent m_timerEvent;
 
   // event handlers
   HandlerTable m_handlers;
 
+  std::atomic<bool> m_isReady{false};
   Mutex *m_readyMutex = nullptr;
   CondVar<bool> *m_readyCondVar = nullptr;
   std::queue<Event> m_pending;

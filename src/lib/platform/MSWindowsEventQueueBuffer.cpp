@@ -11,6 +11,8 @@
 #include "arch/win32/ArchDaemonWindows.h"
 #include "base/IEventQueue.h"
 
+#include <cmath>
+
 //
 // MSWindowsEventQueueBuffer
 //
@@ -41,12 +43,14 @@ void MSWindowsEventQueueBuffer::waitForEvent(double timeout)
     return;
   }
 
-  // convert timeout
+  // convert timeout (round sub-millisecond waits up to 1ms to avoid 0ms busy-spin)
   DWORD t;
   if (timeout < 0.0) {
     t = INFINITE;
+  } else if (timeout > 0.0) {
+    t = static_cast<DWORD>(std::ceil(1000.0 * timeout));
   } else {
-    t = (DWORD)(1000.0 * timeout);
+    t = 0;
   }
 
   // wait for a message.  we cannot be interrupted by thread
