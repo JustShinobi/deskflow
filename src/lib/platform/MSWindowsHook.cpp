@@ -11,12 +11,66 @@
 #include "base/Log.h"
 #include "deskflow/DisplayException.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
 #ifndef WM_MOUSEHWHEEL
 #define WM_MOUSEHWHEEL 0x020E
 #endif
+
+namespace {
+
+struct HookEdgeConfig
+{
+  uint32_t monitorSides = 0;
+  std::vector<deskflow::MonitorEdge> edges;
+  std::vector<deskflow::MonitorRect> monitors;
+};
+
+constexpr int32_t kLocalEdgeWatchMargin = 32;
+
+HookEdgeConfig s_edgeConfigs[2];
+std::atomic<uint32_t> s_activeEdgeConfig{0};
+std::atomic<bool> s_wasNearEdge{true};
+std::atomic<int32_t> s_lastLocalX{0};
+std::atomic<int32_t> s_lastLocalY{0};
+std::atomic<bool> s_hasLastLocal{false};
+
+std::atomic<int32_t> s_anchorX{0};
+std::atomic<int32_t> s_anchorY{0};
+std::atomic<int32_t> s_maxRelayDeltaX{640};
+std::atomic<int32_t> s_maxRelayDeltaY{480};
+std::atomic<int32_t> s_relayedDx{0};
+std::atomic<int32_t> s_relayedDy{0};
+std::atomic<bool> s_relayMovePosted{false};
+std::atomic<bool> s_needsRecenter{false};
+
+bool rectContains(const deskflow::MonitorRect &r, int32_t x, int32_t y)
+{
+  return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+}
+
+int32_t edgeDepth(Direction side, const deskflow::MonitorRect &r, int32_t x, int32_t y)
+{
+  switch (side) {
+  case Direction::Left:
+    return x - r.x;
+  case Direction::Right:
+    return (r.x + r.width - 1) - x;
+  case Direction::Top:
+    return y - r.y;
+  case Direction::Bottom:
+    return (r.y + r.height - 1) - y;
+  default:
+    return INT32_MAX;
+  }
+}
+
+} // namespace
 
 static const char *g_name = "dfwhook";
 
@@ -26,16 +80,13 @@ static HHOOK g_getMessage = nullptr;
 static HHOOK g_keyboardLL = nullptr;
 static HHOOK g_mouseLL = nullptr;
 static bool g_screenSaver = false;
-static EHookMode g_mode = kHOOK_DISABLE;
-static uint32_t g_zoneSides = 0;
-static int32_t g_zoneSize = 0;
-static int32_t g_xComputer = 0;
-static int32_t g_yComputer = 0;
-static int32_t g_wComputer = 0;
-static int32_t g_hComputer = 0;
-static uint32_t s_monitorSides = 0;
-static std::vector<deskflow::MonitorEdge> s_monitorEdges;
-static std::mutex s_monitorEdgesMutex;
+static std::atomic<EHookMode> g_mode{kHOOK_DISABLE};
+static std::atomic<uint32_t> g_zoneSides{0};
+static std::atomic<int32_t> g_zoneSize{0};
+static std::atomic<int32_t> g_xComputer{0};
+static std::atomic<int32_t> g_yComputer{0};
+static std::atomic<int32_t> g_wComputer{0};
+static std::atomic<int32_t> g_hComputer{0};
 static WPARAM g_deadVirtKey = 0;
 static WPARAM g_deadRelease = 0;
 static LPARAM g_deadLParam = 0;
@@ -127,37 +178,81 @@ int MSWindowsHook::cleanup()
 
 void MSWindowsHook::setSides(uint32_t sides)
 {
-  g_zoneSides = sides;
+  g_zoneSides.store(sides, std::memory_order_release);
+  s_wasNearEdge.store(true, std::memory_order_release);
 }
 
 uint32_t MSWindowsHook::getSides()
 {
-  return g_zoneSides;
+  return g_zoneSides.load(std::memory_order_acquire);
 }
 
 void MSWindowsHook::setZone(int32_t x, int32_t y, int32_t w, int32_t h, int32_t jumpZoneSize)
 {
-  g_zoneSize = jumpZoneSize;
-  g_xComputer = x;
-  g_yComputer = y;
-  g_wComputer = w;
-  g_hComputer = h;
+  g_zoneSize.store(jumpZoneSize, std::memory_order_relaxed);
+  g_xComputer.store(x, std::memory_order_relaxed);
+  g_yComputer.store(y, std::memory_order_relaxed);
+  g_wComputer.store(w, std::memory_order_relaxed);
+  g_hComputer.store(h, std::memory_order_release);
+  s_wasNearEdge.store(true, std::memory_order_release);
 }
 
 void MSWindowsHook::setMode(EHookMode mode)
 {
-  if (mode == g_mode) {
-    // no change
+  if (mode == g_mode.load(std::memory_order_acquire)) {
     return;
   }
-  g_mode = mode;
+  if (mode == kHOOK_RELAY_EVENTS) {
+    s_relayedDx.store(0, std::memory_order_relaxed);
+    s_relayedDy.store(0, std::memory_order_relaxed);
+    s_relayMovePosted.store(false, std::memory_order_relaxed);
+    s_needsRecenter.store(false, std::memory_order_relaxed);
+  } else if (mode == kHOOK_WATCH_JUMP_ZONE) {
+    POINT pt{};
+    if (GetCursorPos(&pt)) {
+      s_lastLocalX.store(pt.x, std::memory_order_relaxed);
+      s_lastLocalY.store(pt.y, std::memory_order_relaxed);
+      s_hasLastLocal.store(true, std::memory_order_relaxed);
+    }
+    s_wasNearEdge.store(true, std::memory_order_relaxed);
+  }
+  g_mode.store(mode, std::memory_order_release);
 }
 
 void MSWindowsHook::setMonitorEdges(uint32_t sides, const std::vector<deskflow::MonitorEdge> &edges)
 {
-  std::lock_guard<std::mutex> lock(s_monitorEdgesMutex);
-  s_monitorSides = sides;
-  s_monitorEdges = edges;
+  const uint32_t nextIdx = s_activeEdgeConfig.load(std::memory_order_relaxed) ^ 1u;
+  HookEdgeConfig &cfg = s_edgeConfigs[nextIdx];
+  cfg.monitorSides = sides;
+  cfg.edges = edges;
+  cfg.monitors = edges.empty() ? std::vector<deskflow::MonitorRect>{} : edges.front().monitors();
+  s_activeEdgeConfig.store(nextIdx, std::memory_order_release);
+  s_wasNearEdge.store(true, std::memory_order_release);
+}
+
+void MSWindowsHook::setRelayAnchor(int32_t centerX, int32_t centerY, int32_t maxDeltaX, int32_t maxDeltaY)
+{
+  s_anchorX.store(centerX, std::memory_order_relaxed);
+  s_anchorY.store(centerY, std::memory_order_relaxed);
+  s_maxRelayDeltaX.store(std::max<int32_t>(maxDeltaX, 64), std::memory_order_relaxed);
+  s_maxRelayDeltaY.store(std::max<int32_t>(maxDeltaY, 64), std::memory_order_release);
+  s_relayedDx.store(0, std::memory_order_relaxed);
+  s_relayedDy.store(0, std::memory_order_relaxed);
+  s_needsRecenter.store(false, std::memory_order_release);
+}
+
+bool MSWindowsHook::isLowLevel()
+{
+  return g_mouseLL != nullptr;
+}
+
+bool MSWindowsHook::consumeRelayedMotion(int32_t &dx, int32_t &dy, bool &needsRecenter)
+{
+  s_relayMovePosted.store(false, std::memory_order_release);
+  dx = s_relayedDx.exchange(0, std::memory_order_acq_rel);
+  dy = s_relayedDy.exchange(0, std::memory_order_acq_rel);
+  needsRecenter = s_needsRecenter.exchange(false, std::memory_order_acq_rel);
+  return dx != 0 || dy != 0 || needsRecenter;
 }
 
 bool MSWindowsHook::getPhysicalKeyState(BYTE keys[MSWindowsHook::kVirtualKeyCount])
@@ -189,7 +284,7 @@ static void keyboardGetState(BYTE keys[MSWindowsHook::kVirtualKeyCount], DWORD v
   // Test whether GetAsyncKeyState() is being honest with us
   key = GetAsyncKeyState(vkCode);
 
-  if (key & 0x80) {
+  if (key < 0) {
     // The only time we know for sure that GetAsyncKeyState() is working
     // is when it tells us that the current key is down.
     // In this case, update g_keyState to reflect what GetAsyncKeyState()
@@ -259,7 +354,9 @@ static WPARAM mapKeyDown(
   bool noAltGr = false;
   if (n == 0 && (control & 0x80) != 0 && (menu & 0x80) != 0) {
     noAltGr = true;
-    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam | 0x05000000, lParam);
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+      PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam | 0x05000000, lParam);
+    }
     setDeadKey(wc, 2, flags);
 
     BYTE keys2[MSWindowsHook::kVirtualKeyCount];
@@ -275,10 +372,12 @@ static WPARAM mapKeyDown(
     n = ToUnicode((UINT)wParam, scanCode, keys2, wc, 2, flags);
   }
 
-  PostThreadMessage(
-      g_threadID, DESKFLOW_MSG_DEBUG, (wc[0] & 0xffff) | ((wParam & 0xff) << 16) | ((n & 0xf) << 24) | 0x60000000,
-      lParam
-  );
+  if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+    PostThreadMessage(
+        g_threadID, DESKFLOW_MSG_DEBUG, (wc[0] & 0xffff) | ((wParam & 0xff) << 16) | ((n & 0xf) << 24) | 0x60000000,
+        lParam
+    );
+  }
   WPARAM charAndVirtKey = 0;
   bool clearDeadKey = false;
   switch (n) {
@@ -355,7 +454,9 @@ static bool keyboardHookHandler(WPARAM wParam, LPARAM lParam)
   if (wParam == DESKFLOW_HOOK_FAKE_INPUT_VIRTUAL_KEY && ((lParam >> 16) & 0xffu) == DESKFLOW_HOOK_FAKE_INPUT_SCANCODE) {
     // update flag
     g_fakeServerInput = ((lParam & 0x80000000u) == 0);
-    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, 0xff000000u | wParam, lParam);
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+      PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, 0xff000000u | wParam, lParam);
+    }
 
     // discard event
     return true;
@@ -364,7 +465,9 @@ static bool keyboardHookHandler(WPARAM wParam, LPARAM lParam)
   // if we're expecting fake input then just pass the event through
   // and do not forward to the server
   if (g_fakeServerInput) {
-    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, 0xfe000000u | wParam, lParam);
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+      PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, 0xfe000000u | wParam, lParam);
+    }
     return false;
   }
 
@@ -375,7 +478,9 @@ static bool keyboardHookHandler(WPARAM wParam, LPARAM lParam)
   }
 
   // tell server about event
-  PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam, lParam);
+  if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam, lParam);
+  }
 
   // we need the keyboard state for ToAscii()
   BYTE keys[MSWindowsHook::kVirtualKeyCount];
@@ -384,7 +489,9 @@ static bool keyboardHookHandler(WPARAM wParam, LPARAM lParam)
   // Update the physical state before ignoring a dead key release so it cannot remain down in the resync snapshot.
   if ((g_deadVirtKey == wParam || g_deadRelease == wParam) && (lParam & 0x80000000u) != 0) {
     g_deadRelease = 0;
-    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam | 0x04000000, lParam);
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+      PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, wParam | 0x04000000, lParam);
+    }
     return false;
   }
 
@@ -454,7 +561,9 @@ static bool keyboardHookHandler(WPARAM wParam, LPARAM lParam)
   // XXX -- with hot keys for actions we may only need to do this when
   // forwarding.
   if (charAndVirtKey != 0) {
-    PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, charAndVirtKey | 0x07000000, lParam);
+    if (CLOG->getFilter() >= LogLevel::Level::Verbose) {
+      PostThreadMessage(g_threadID, DESKFLOW_MSG_DEBUG, charAndVirtKey | 0x07000000, lParam);
+    }
     PostThreadMessage(g_threadID, DESKFLOW_MSG_KEY, charAndVirtKey, lParam);
   }
 
@@ -575,140 +684,213 @@ static bool mouseHookHandler(WPARAM wParam, int32_t x, int32_t y, int32_t data)
     return (g_mode == kHOOK_RELAY_EVENTS);
 
   case WM_NCMOUSEMOVE:
-  case WM_MOUSEMOVE:
-    if (g_mode == kHOOK_RELAY_EVENTS) {
-      // relay and eat event
+  case WM_MOUSEMOVE: {
+    const EHookMode mode = g_mode.load(std::memory_order_acquire);
+    if (mode == kHOOK_RELAY_EVENTS) {
+      if (g_mouseLL != nullptr) {
+        // Low-level hook eats the move before Windows shifts the OS cursor, so
+        // (x, y) is always relative to the stationary anchor (m_xCenter, m_yCenter).
+        // Accumulate deltas lock-free and post at most one notification per drain.
+        const int32_t dx = x - s_anchorX.load(std::memory_order_relaxed);
+        const int32_t dy = y - s_anchorY.load(std::memory_order_relaxed);
+        if (dx == 0 && dy == 0) {
+          return true;
+        }
+        if (std::abs(dx) > s_maxRelayDeltaX.load(std::memory_order_relaxed) ||
+            std::abs(dy) > s_maxRelayDeltaY.load(std::memory_order_relaxed)) {
+          s_needsRecenter.store(true, std::memory_order_release);
+        } else {
+          s_relayedDx.fetch_add(dx, std::memory_order_relaxed);
+          s_relayedDy.fetch_add(dy, std::memory_order_relaxed);
+        }
+        if (!s_relayMovePosted.exchange(true, std::memory_order_acq_rel)) {
+          PostThreadMessage(g_threadID, DESKFLOW_MSG_MOUSE_MOVE, 0, 0);
+        }
+        return true;
+      }
+      // Legacy non-LL hook fallback
       PostThreadMessage(g_threadID, DESKFLOW_MSG_MOUSE_MOVE, x, y);
       return true;
-    } else if (g_mode == kHOOK_WATCH_JUMP_ZONE) {
-      // low level hooks can report bogus mouse positions that are
-      // outside of the computer.  jeez.  naturally we end up getting
-      // fake motion in the other direction to get the position back
-      // on the computer, which plays havoc with switch on double tap.
-      // Server deals with that.  we'll clamp positions onto the
-      // computer.  also, if we discard events for positions outside
-      // of the computer then the mouse appears to get a bit jerky
-      // near the edge.  we can either accept that or pass the bogus
-      // events.  we'll try passing the events.
+    } else if (mode == kHOOK_WATCH_JUMP_ZONE) {
+      const int32_t rawX = x;
+      const int32_t rawY = y;
+      const int32_t xComp = g_xComputer.load(std::memory_order_relaxed);
+      const int32_t yComp = g_yComputer.load(std::memory_order_relaxed);
+      const int32_t wComp = g_wComputer.load(std::memory_order_relaxed);
+      const int32_t hComp = g_hComputer.load(std::memory_order_relaxed);
+      const int32_t zoneSize = g_zoneSize.load(std::memory_order_relaxed);
+      const uint32_t zoneSides = g_zoneSides.load(std::memory_order_relaxed);
+
       bool bogus = false;
-      if (x < g_xComputer) {
-        x = g_xComputer;
+      if (x < xComp) {
+        x = xComp;
         bogus = true;
-      } else if (x >= g_xComputer + g_wComputer) {
-        x = g_xComputer + g_wComputer - 1;
+      } else if (x >= xComp + wComp) {
+        x = xComp + wComp - 1;
         bogus = true;
       }
-      if (y < g_yComputer) {
-        y = g_yComputer;
+      if (y < yComp) {
+        y = yComp;
         bogus = true;
-      } else if (y >= g_yComputer + g_hComputer) {
-        y = g_yComputer + g_hComputer - 1;
+      } else if (y >= yComp + hComp) {
+        y = yComp + hComp - 1;
         bogus = true;
       }
 
-      // check for mouse inside jump zone
       bool inside = false;
-      std::lock_guard<std::mutex> lock(s_monitorEdgesMutex);
-      POINT cursor{};
-      const bool haveCursor = !s_monitorEdges.empty() && GetCursorPos(&cursor);
-      for (const auto &edge : s_monitorEdges) {
-        if ((g_zoneSides & (1u << static_cast<int>(edge.side()))) == 0 || !haveCursor ||
-            !edge.contains(cursor.x, cursor.y)) {
+      bool nearEdge = false;
+      const HookEdgeConfig &cfg = s_edgeConfigs[s_activeEdgeConfig.load(std::memory_order_acquire)];
+      const bool havePrev = s_hasLastLocal.load(std::memory_order_relaxed);
+      const int32_t prevX = havePrev ? s_lastLocalX.load(std::memory_order_relaxed) : rawX;
+      const int32_t prevY = havePrev ? s_lastLocalY.load(std::memory_order_relaxed) : rawY;
+
+      for (const auto &edge : cfg.edges) {
+        if ((zoneSides & (1u << static_cast<int>(edge.side()))) == 0) {
           continue;
+        }
+        const bool onEdgeMonitor = edge.contains(rawX, rawY) || edge.contains(prevX, prevY);
+        if (!onEdgeMonitor) {
+          continue;
+        }
+        if (edgeDepth(edge.side(), edge.monitor(), rawX, rawY) < zoneSize + kLocalEdgeWatchMargin) {
+          nearEdge = true;
         }
         int32_t projectedX = x;
         int32_t projectedY = y;
-        inside = edge.project(projectedX, projectedY, g_zoneSize);
-        if (inside) {
+        if (!inside && edge.project(projectedX, projectedY, zoneSize)) {
+          inside = true;
+          nearEdge = true;
           break;
         }
       }
-      const uint32_t desktopSides = g_zoneSides & ~s_monitorSides;
+
+      if (cfg.monitors.empty()) {
+        s_lastLocalX.store(x, std::memory_order_relaxed);
+        s_lastLocalY.store(y, std::memory_order_relaxed);
+        s_hasLastLocal.store(true, std::memory_order_relaxed);
+      } else {
+        for (const auto &mon : cfg.monitors) {
+          if (rectContains(mon, rawX, rawY)) {
+            s_lastLocalX.store(rawX, std::memory_order_relaxed);
+            s_lastLocalY.store(rawY, std::memory_order_relaxed);
+            s_hasLastLocal.store(true, std::memory_order_relaxed);
+            break;
+          }
+        }
+      }
+
+      const uint32_t desktopSides = zoneSides & ~cfg.monitorSides;
       using enum DirectionMask;
-      if (!inside && (desktopSides & static_cast<int>(LeftMask)) != 0) {
-        inside = (x < g_xComputer + g_zoneSize);
+      const int32_t watchMargin = zoneSize + kLocalEdgeWatchMargin;
+      if ((desktopSides & static_cast<uint32_t>(LeftMask)) != 0) {
+        if (x < xComp + watchMargin) {
+          nearEdge = true;
+        }
+        if (!inside && x < xComp + zoneSize) {
+          inside = true;
+        }
       }
-      if (!inside && (desktopSides & static_cast<int>(RightMask)) != 0) {
-        inside = (x >= g_xComputer + g_wComputer - g_zoneSize);
+      if ((desktopSides & static_cast<uint32_t>(RightMask)) != 0) {
+        if (x >= xComp + wComp - watchMargin) {
+          nearEdge = true;
+        }
+        if (!inside && x >= xComp + wComp - zoneSize) {
+          inside = true;
+        }
       }
-      if (!inside && (desktopSides & static_cast<int>(TopMask)) != 0) {
-        inside = (y < g_yComputer + g_zoneSize);
+      if ((desktopSides & static_cast<uint32_t>(TopMask)) != 0) {
+        if (y < yComp + watchMargin) {
+          nearEdge = true;
+        }
+        if (!inside && y < yComp + zoneSize) {
+          inside = true;
+        }
       }
-      if (!inside && (desktopSides & static_cast<int>(BottomMask)) != 0) {
-        inside = (y >= g_yComputer + g_hComputer - g_zoneSize);
+      if ((desktopSides & static_cast<uint32_t>(BottomMask)) != 0) {
+        if (y >= yComp + hComp - watchMargin) {
+          nearEdge = true;
+        }
+        if (!inside && y >= yComp + hComp - zoneSize) {
+          inside = true;
+        }
       }
 
-      // relay the event
-      PostThreadMessage(g_threadID, DESKFLOW_MSG_MOUSE_MOVE, x, y);
+      if (inside || nearEdge) {
+        s_wasNearEdge.store(true, std::memory_order_relaxed);
+        PostThreadMessage(g_threadID, DESKFLOW_MSG_MOUSE_MOVE, x, y);
+      } else if (s_wasNearEdge.exchange(false, std::memory_order_relaxed)) {
+        // Post one exit sample so Server::noSwitch() cancels switchDelay / arms double-tap.
+        PostThreadMessage(g_threadID, DESKFLOW_MSG_MOUSE_MOVE, x, y);
+      }
 
-      // if inside and not bogus then eat the event
       return inside && !bogus;
     }
+    break;
   }
 
-  // pass the event
-  return false;
-}
+    // pass the event
+    return false;
+  }
 
-static LRESULT CALLBACK mouseLLHook(int code, WPARAM wParam, LPARAM lParam)
-{
-  if (code >= 0) {
-    // decode the message
-    MSLLHOOKSTRUCT *info = reinterpret_cast<MSLLHOOKSTRUCT *>(lParam);
+  static LRESULT CALLBACK mouseLLHook(int code, WPARAM wParam, LPARAM lParam)
+  {
+    if (code >= 0) {
+      // decode the message
+      MSLLHOOKSTRUCT *info = reinterpret_cast<MSLLHOOKSTRUCT *>(lParam);
 
-    bool const injected = info->flags & LLMHF_INJECTED;
-    if (!g_isPrimary && injected) {
-      return CallNextHookEx(g_mouseLL, code, wParam, lParam);
+      bool const injected = info->flags & LLMHF_INJECTED;
+      if (!g_isPrimary && injected) {
+        return CallNextHookEx(g_mouseLL, code, wParam, lParam);
+      }
+
+      int32_t x = static_cast<int32_t>(info->pt.x);
+      int32_t y = static_cast<int32_t>(info->pt.y);
+      int32_t w = static_cast<int16_t>(HIWORD(info->mouseData));
+
+      // handle the message
+      if (mouseHookHandler(wParam, x, y, w)) {
+        return 1;
+      }
     }
 
-    int32_t x = static_cast<int32_t>(info->pt.x);
-    int32_t y = static_cast<int32_t>(info->pt.y);
-    int32_t w = static_cast<int16_t>(HIWORD(info->mouseData));
+    return CallNextHookEx(g_mouseLL, code, wParam, lParam);
+  }
 
-    // handle the message
-    if (mouseHookHandler(wParam, x, y, w)) {
-      return 1;
+  EHookResult MSWindowsHook::install()
+  {
+    assert(g_getMessage == nullptr || g_screenSaver);
+
+    // must be initialized
+    if (g_threadID == 0) {
+      return kHOOK_FAILED;
     }
-  }
 
-  return CallNextHookEx(g_mouseLL, code, wParam, lParam);
-}
+    // discard old dead keys
+    g_deadVirtKey = 0;
+    g_deadLParam = 0;
+    g_deadRelease = 0;
+    std::memset(g_lastChars, 0, sizeof(g_lastChars));
+    std::memset(g_lastNoAltGr, 0, sizeof(g_lastNoAltGr));
 
-EHookResult MSWindowsHook::install()
-{
-  assert(g_getMessage == nullptr || g_screenSaver);
+    // reset fake input flag
+    g_fakeServerInput = false;
 
-  // must be initialized
-  if (g_threadID == 0) {
-    return kHOOK_FAILED;
-  }
-
-  // discard old dead keys
-  g_deadVirtKey = 0;
-  g_deadLParam = 0;
-  g_deadRelease = 0;
-  std::memset(g_lastChars, 0, sizeof(g_lastChars));
-  std::memset(g_lastNoAltGr, 0, sizeof(g_lastNoAltGr));
-
-  // reset fake input flag
-  g_fakeServerInput = false;
-
-  // install low-level hooks.  we require that they both get installed.
-  g_mouseLL = SetWindowsHookEx(WH_MOUSE_LL, &mouseLLHook, nullptr, 0);
+    // install low-level hooks.  we require that they both get installed.
+    g_mouseLL = SetWindowsHookEx(WH_MOUSE_LL, &mouseLLHook, nullptr, 0);
 #if !NO_GRAB_KEYBOARD
-  g_keyboardLL = SetWindowsHookEx(WH_KEYBOARD_LL, &keyboardLLHook, nullptr, 0);
-  if (g_mouseLL == nullptr || g_keyboardLL == nullptr) {
-    if (g_keyboardLL != nullptr) {
-      UnhookWindowsHookEx(g_keyboardLL);
-      g_keyboardLL = nullptr;
+    g_keyboardLL = SetWindowsHookEx(WH_KEYBOARD_LL, &keyboardLLHook, nullptr, 0);
+    if (g_mouseLL == nullptr || g_keyboardLL == nullptr) {
+      if (g_keyboardLL != nullptr) {
+        UnhookWindowsHookEx(g_keyboardLL);
+        g_keyboardLL = nullptr;
+      }
+      if (g_mouseLL != nullptr) {
+        UnhookWindowsHookEx(g_mouseLL);
+        g_mouseLL = nullptr;
+      }
     }
-    if (g_mouseLL != nullptr) {
-      UnhookWindowsHookEx(g_mouseLL);
-      g_mouseLL = nullptr;
-    }
-  }
 #endif
-  // clang-format off
+    // clang-format off
   // check that we got all the hooks we wanted
   if (
       (g_mouseLL == nullptr) ||
@@ -719,88 +901,88 @@ EHookResult MSWindowsHook::install()
     uninstall();
     return kHOOK_FAILED;
   }
-  // clang-format on
-  if (g_keyboardLL != nullptr || g_mouseLL != nullptr) {
-    g_hookThread = GetCurrentThreadId();
-    return kHOOK_OKAY_LL;
+    // clang-format on
+    if (g_keyboardLL != nullptr || g_mouseLL != nullptr) {
+      g_hookThread = GetCurrentThreadId();
+      return kHOOK_OKAY_LL;
+    }
+
+    return kHOOK_OKAY;
   }
 
-  return kHOOK_OKAY;
-}
+  int MSWindowsHook::uninstall()
+  {
+    // discard old dead keys
+    g_deadVirtKey = 0;
+    g_deadLParam = 0;
+    g_deadRelease = 0;
+    std::memset(g_lastChars, 0, sizeof(g_lastChars));
+    std::memset(g_lastNoAltGr, 0, sizeof(g_lastNoAltGr));
 
-int MSWindowsHook::uninstall()
-{
-  // discard old dead keys
-  g_deadVirtKey = 0;
-  g_deadLParam = 0;
-  g_deadRelease = 0;
-  std::memset(g_lastChars, 0, sizeof(g_lastChars));
-  std::memset(g_lastNoAltGr, 0, sizeof(g_lastNoAltGr));
+    // uninstall hooks
+    if (g_keyboardLL != nullptr) {
+      UnhookWindowsHookEx(g_keyboardLL);
+      g_keyboardLL = nullptr;
+    }
+    if (g_mouseLL != nullptr) {
+      UnhookWindowsHookEx(g_mouseLL);
+      g_mouseLL = nullptr;
+    }
+    if (g_getMessage != nullptr && !g_screenSaver) {
+      UnhookWindowsHookEx(g_getMessage);
+      g_getMessage = nullptr;
+    }
 
-  // uninstall hooks
-  if (g_keyboardLL != nullptr) {
-    UnhookWindowsHookEx(g_keyboardLL);
-    g_keyboardLL = nullptr;
+    std::lock_guard<std::mutex> lock(g_keyStateMutex);
+    std::memset(g_keyState, 0, sizeof(g_keyState));
+    g_keyStateValid = false;
+
+    return 1;
   }
-  if (g_mouseLL != nullptr) {
-    UnhookWindowsHookEx(g_mouseLL);
-    g_mouseLL = nullptr;
-  }
-  if (g_getMessage != nullptr && !g_screenSaver) {
-    UnhookWindowsHookEx(g_getMessage);
-    g_getMessage = nullptr;
-  }
 
-  std::lock_guard<std::mutex> lock(g_keyStateMutex);
-  std::memset(g_keyState, 0, sizeof(g_keyState));
-  g_keyStateValid = false;
-
-  return 1;
-}
-
-static LRESULT CALLBACK getMessageHook(int code, WPARAM wParam, LPARAM lParam)
-{
-  if (code >= 0) {
-    if (g_screenSaver) {
-      MSG *msg = reinterpret_cast<MSG *>(lParam);
-      if (msg->message == WM_SYSCOMMAND && msg->wParam == SC_SCREENSAVE) {
-        // broadcast screen saver started message
-        PostThreadMessage(g_threadID, DESKFLOW_MSG_SCREEN_SAVER, TRUE, 0);
+  static LRESULT CALLBACK getMessageHook(int code, WPARAM wParam, LPARAM lParam)
+  {
+    if (code >= 0) {
+      if (g_screenSaver) {
+        MSG *msg = reinterpret_cast<MSG *>(lParam);
+        if (msg->message == WM_SYSCOMMAND && msg->wParam == SC_SCREENSAVE) {
+          // broadcast screen saver started message
+          PostThreadMessage(g_threadID, DESKFLOW_MSG_SCREEN_SAVER, TRUE, 0);
+        }
       }
     }
+
+    return CallNextHookEx(g_getMessage, code, wParam, lParam);
   }
 
-  return CallNextHookEx(g_getMessage, code, wParam, lParam);
-}
+  int MSWindowsHook::installScreenSaver()
+  {
+    // must be initialized
+    if (g_threadID == 0) {
+      return 0;
+    }
 
-int MSWindowsHook::installScreenSaver()
-{
-  // must be initialized
-  if (g_threadID == 0) {
-    return 0;
+    // generate screen saver messages
+    g_screenSaver = true;
+
+    // install hook unless it's already installed
+    if (g_getMessage == nullptr) {
+      g_getMessage = SetWindowsHookEx(WH_GETMESSAGE, &getMessageHook, nullptr, 0);
+    }
+
+    return (g_getMessage != nullptr) ? 1 : 0;
   }
 
-  // generate screen saver messages
-  g_screenSaver = true;
+  int MSWindowsHook::uninstallScreenSaver()
+  {
+    // uninstall hook unless the mouse wheel hook is installed
+    if (g_getMessage != nullptr) {
+      UnhookWindowsHookEx(g_getMessage);
+      g_getMessage = nullptr;
+    }
 
-  // install hook unless it's already installed
-  if (g_getMessage == nullptr) {
-    g_getMessage = SetWindowsHookEx(WH_GETMESSAGE, &getMessageHook, nullptr, 0);
+    // screen saver hook is no longer installed
+    g_screenSaver = false;
+
+    return 1;
   }
-
-  return (g_getMessage != nullptr) ? 1 : 0;
-}
-
-int MSWindowsHook::uninstallScreenSaver()
-{
-  // uninstall hook unless the mouse wheel hook is installed
-  if (g_getMessage != nullptr) {
-    UnhookWindowsHookEx(g_getMessage);
-    g_getMessage = nullptr;
-  }
-
-  // screen saver hook is no longer installed
-  g_screenSaver = false;
-
-  return 1;
-}

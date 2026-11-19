@@ -13,6 +13,7 @@
 #include "mt/CondVar.h"
 #include "mt/Mutex.h"
 
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -249,7 +250,7 @@ private:
 
   // computer shape stuff
   int32_t m_x = 0;
-  int32_t m_y = 9;
+  int32_t m_y = 0;
   int32_t m_w = 0;
   int32_t m_h = 0;
   int32_t m_xCenter = 0;
@@ -265,6 +266,15 @@ private:
   DWORD m_threadID;
   const IScreenSaver *m_screensaver;
   bool m_screensaverNotify = false;
+  BOOL m_screensaverRunning = FALSE;
+
+  // lock-free coalesced client mouse injection state
+  mutable std::atomic<int32_t> m_pendingMoveX{0};
+  mutable std::atomic<int32_t> m_pendingMoveY{0};
+  mutable std::atomic<bool> m_moveQueued{false};
+  mutable std::atomic<int32_t> m_pendingRelDx{0};
+  mutable std::atomic<int32_t> m_pendingRelDy{0};
+  mutable std::atomic<bool> m_relMoveQueued{false};
 
   // the current desk and it's name
   Desk *m_activeDesk = nullptr;

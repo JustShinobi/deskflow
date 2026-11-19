@@ -292,8 +292,11 @@ void MSWindowsComputer::leave()
 
   if (m_isPrimary) {
     LOG_VERBOSE("centering cursor on leave: %+d, %+d", m_xCenter, m_yCenter);
+    const int32_t screenW = GetSystemMetrics(SM_CXSCREEN);
+    const int32_t screenH = GetSystemMetrics(SM_CYSCREEN);
+    m_hook.setRelayAnchor(m_xCenter, m_yCenter, screenW / 3, screenH / 3);
     warpCursor(m_xCenter, m_yCenter);
-    m_remoteMotion.beginTransition(m_xCenter, m_yCenter, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    m_remoteMotion.beginTransition(m_xCenter, m_yCenter, screenW, screenH);
 
     // disable special key sequences on win95 family
     enableSpecialKeys(false);
@@ -507,7 +510,7 @@ void MSWindowsComputer::updateDesktopThread()
 void MSWindowsComputer::reconfigure(uint32_t activeSides)
 {
   assert(m_isPrimary);
-  const static auto sidesText = sidesMaskToString(activeSides);
+  const auto sidesText = sidesMaskToString(activeSides);
   LOG_DEBUG("active sides: %s (0x%02x)", sidesText.c_str(), activeSides);
   m_hook.setSides(activeSides);
 }
@@ -551,6 +554,16 @@ void MSWindowsComputer::saveMousePosition(int32_t x, int32_t y)
   m_xCursor = x;
   m_yCursor = y;
   m_remoteMotion.setPosition(x, y);
+  if (m_isOnComputer) {
+    for (const auto &mon : m_localMonitors) {
+      if (x >= mon.x && x < mon.x + mon.width && y >= mon.y && y < mon.y + mon.height) {
+        m_lastLocalX = x;
+        m_lastLocalY = y;
+        m_hasLastLocal = true;
+        break;
+      }
+    }
+  }
 
   LOG_VERBOSE("saved mouse position for next delta: %+d,%+d", x, y);
 }
@@ -1244,6 +1257,33 @@ bool MSWindowsComputer::onMouseButton(WPARAM wParam, LPARAM lParam)
 //   example)
 bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
 {
+  if (!m_isOnComputer && MSWindowsHook::isLowLevel()) {
+    int32_t dx = 0;
+    int32_t dy = 0;
+    bool needsRecenter = false;
+    MSWindowsHook::consumeRelayedMotion(dx, dy, needsRecenter);
+    if (ignore()) {
+      return true;
+    }
+    if (needsRecenter) {
+      setThisCursorPos(m_xCenter, m_yCenter);
+      saveMousePosition(m_xCenter, m_yCenter);
+    }
+    if (dx != 0 || dy != 0) {
+      sendEvent(EventTypes::PrimaryComputerMotionOnSecondary, MotionInfo::alloc(dx, dy));
+    }
+    return true;
+  }
+
+  // Coalesce consecutive local mouse moves already queued for this thread.
+  if (m_isOnComputer) {
+    MSG queuedMove;
+    while (PeekMessage(&queuedMove, nullptr, DESKFLOW_MSG_MOUSE_MOVE, DESKFLOW_MSG_MOUSE_MOVE, PM_REMOVE)) {
+      mx = static_cast<int32_t>(queuedMove.wParam);
+      my = static_cast<int32_t>(queuedMove.lParam);
+    }
+  }
+
   // compute motion delta (relative to the last known
   // mouse position)
   int32_t x = mx - m_xCursor;
@@ -1268,6 +1308,9 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
     y = motion->y;
   }
 
+  const int32_t prevLocalX = m_hasLastLocal ? m_lastLocalX : mx;
+  const int32_t prevLocalY = m_hasLastLocal ? m_lastLocalY : my;
+
   // save position to compute delta of next motion
   saveMousePosition(mx, my);
 
@@ -1275,11 +1318,10 @@ bool MSWindowsComputer::onMouseMove(int32_t mx, int32_t my)
     int32_t reportX = m_xCursor;
     int32_t reportY = m_yCursor;
     bool projected = false;
-    POINT cursor{};
-    const bool haveCursor = !m_monitorEdges.empty() && getThisCursorPos(&cursor);
     for (const auto &edge : m_monitorEdges) {
-      if ((activeSides() & (1u << static_cast<int>(edge.side()))) != 0 && haveCursor &&
-          edge.contains(cursor.x, cursor.y) && edge.project(reportX, reportY, getJumpZoneSize() + 3)) {
+      if ((activeSides() & (1u << static_cast<int>(edge.side()))) != 0 &&
+          (edge.contains(mx, my) || edge.contains(prevLocalX, prevLocalY)) &&
+          edge.project(reportX, reportY, getJumpZoneSize() + 3)) {
         projected = true;
         break;
       }
@@ -1511,6 +1553,8 @@ void MSWindowsComputer::updateComputerShape()
     return;
   }
 
+  m_hook.setRelayAnchor(m_xCenter, m_yCenter, GetSystemMetrics(SM_CXSCREEN) / 3, GetSystemMetrics(SM_CYSCREEN) / 3);
+
   std::vector<MONITORINFOEXW> monitors;
   EnumDisplayMonitors(
       nullptr, nullptr,
@@ -1529,6 +1573,7 @@ void MSWindowsComputer::updateComputerShape()
     const auto &r = info.rcMonitor;
     rectangles.push_back({r.left, r.top, r.right - r.left, r.bottom - r.top});
   }
+  m_localMonitors = rectangles;
   const std::array keys = {
       Settings::Server::SwitchMonitorLeft, Settings::Server::SwitchMonitorRight, Settings::Server::SwitchMonitorTop,
       Settings::Server::SwitchMonitorBottom

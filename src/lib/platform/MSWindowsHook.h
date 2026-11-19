@@ -68,7 +68,16 @@ public:
   //! Replace configured desktop sides with physical monitor jump zones.
   void setMonitorEdges(uint32_t sides, const std::vector<deskflow::MonitorEdge> &edges);
 
+  //! Configure the stationary cursor anchor and sanity bounds for low-level relay mode.
+  void setRelayAnchor(int32_t centerX, int32_t centerY, int32_t maxDeltaX, int32_t maxDeltaY);
+
   void setMode(EHookMode mode);
+
+  //! True when the low-level mouse hook is active.
+  static bool isLowLevel();
+
+  //! Atomically drain accumulated relative deltas from low-level relay mode.
+  static bool consumeRelayedMotion(int32_t &dx, int32_t &dy, bool &needsRecenter);
 
   //! Copy the hook's physical key state; false until it has observed an event.
   static bool getPhysicalKeyState(BYTE keys[kVirtualKeyCount]);

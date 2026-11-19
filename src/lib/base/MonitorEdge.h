@@ -46,6 +46,18 @@ public:
   //! Exposed edge intervals in local desktop coordinates.
   const std::vector<std::pair<int32_t, int32_t>> &segments() const;
 
+  //! Physical monitor bounds in local desktop coordinates.
+  const MonitorRect &monitor() const
+  {
+    return m_monitor;
+  }
+
+  //! All known local monitor bounds.
+  const std::vector<MonitorRect> &monitors() const
+  {
+    return m_monitors;
+  }
+
 private:
   bool vertical() const;
   int32_t monitorBoundary() const;

@@ -277,7 +277,11 @@ private:
   // true if system appears to have multiple monitors
   bool m_multimon = false;
   std::vector<deskflow::MonitorEdge> m_monitorEdges;
+  std::vector<deskflow::MonitorRect> m_localMonitors;
   uint32_t m_monitorSides = 0;
+  int32_t m_lastLocalX = 0;
+  int32_t m_lastLocalY = 0;
+  bool m_hasLastLocal = false;
 
   // last mouse position
   int32_t m_xCursor = 0;

@@ -65,6 +65,10 @@ ArchThreadImpl::ArchThreadImpl()
 
 ArchThreadImpl::~ArchThreadImpl()
 {
+  if (m_thread != nullptr) {
+    CloseHandle(m_thread);
+    m_thread = nullptr;
+  }
   CloseHandle(m_exit);
   CloseHandle(m_cancel);
 }
@@ -91,7 +95,10 @@ ArchMultithreadWindows::ArchMultithreadWindows()
   // create thread for calling (main) thread and add it to our
   // list.  no need to lock the mutex since we're the only thread.
   m_mainThread = new ArchThreadImpl;
-  m_mainThread->m_thread = nullptr;
+  DuplicateHandle(
+      GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &m_mainThread->m_thread, 0, FALSE,
+      DUPLICATE_SAME_ACCESS
+  );
   m_mainThread->m_id = GetCurrentThreadId();
   insert(m_mainThread);
 }
@@ -296,21 +303,17 @@ void ArchMultithreadWindows::closeThread(ArchThread thread)
 {
   assert(thread != nullptr);
 
-  // decrement ref count and clean up thread if no more references
-  if (--thread->m_refCount == 0) {
-    // close the handle (main thread has a nullptr handle)
-    if (thread->m_thread != nullptr) {
-      CloseHandle(thread->m_thread);
-    }
-
-    // remove thread from list
-    {
-      std::scoped_lock lock{m_threadMutex};
+  bool destroy = false;
+  {
+    std::scoped_lock lock{m_threadMutex};
+    if (--thread->m_refCount == 0) {
       assert(findNoRef(thread->m_id) == thread);
       erase(thread);
+      destroy = true;
     }
+  }
 
-    // done with thread
+  if (destroy) {
     delete thread;
   }
 }
@@ -383,8 +386,12 @@ void ArchMultithreadWindows::setPriorityOfThread(ArchThread thread, int n)
       index = s_pMax;
     }
   }
-  SetPriorityClass(GetCurrentProcess(), s_pClass[index].m_class);
-  SetThreadPriority(thread->m_thread, s_pClass[index].m_level);
+  if (s_pClass[index].m_class == HIGH_PRIORITY_CLASS || s_pClass[index].m_class == REALTIME_PRIORITY_CLASS) {
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+  }
+  if (thread->m_thread != nullptr) {
+    SetThreadPriority(thread->m_thread, s_pClass[index].m_level);
+  }
 }
 
 void ArchMultithreadWindows::testCancelThread()

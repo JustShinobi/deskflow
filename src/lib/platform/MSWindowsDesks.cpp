@@ -21,6 +21,8 @@
 #include "platform/MSWindowsComputer.h"
 #include "platform/MSWindowsHook.h"
 
+#include <algorithm>
+#include <cmath>
 #include <malloc.h>
 
 // these are only defined when WINVER >= 0x0500
@@ -302,12 +304,24 @@ void MSWindowsDesks::fakeMouseButton(ButtonID button, bool press)
 
 void MSWindowsDesks::fakeMouseMove(int32_t x, int32_t y) const
 {
-  sendMessage(DESKFLOW_MSG_FAKE_MOVE, static_cast<WPARAM>(x), static_cast<LPARAM>(y));
+  m_pendingMoveX.store(x, std::memory_order_relaxed);
+  m_pendingMoveY.store(y, std::memory_order_release);
+  if (m_activeDesk != nullptr && m_activeDesk->m_window != nullptr) {
+    if (!m_moveQueued.exchange(true, std::memory_order_acq_rel)) {
+      PostThreadMessage(m_activeDesk->m_threadID, DESKFLOW_MSG_FAKE_MOVE, 0, 0);
+    }
+  }
 }
 
 void MSWindowsDesks::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
 {
-  sendMessage(DESKFLOW_MSG_FAKE_REL_MOVE, static_cast<WPARAM>(dx), static_cast<LPARAM>(dy));
+  m_pendingRelDx.fetch_add(dx, std::memory_order_relaxed);
+  m_pendingRelDy.fetch_add(dy, std::memory_order_release);
+  if (m_activeDesk != nullptr && m_activeDesk->m_window != nullptr) {
+    if (!m_relMoveQueued.exchange(true, std::memory_order_acq_rel)) {
+      PostThreadMessage(m_activeDesk->m_threadID, DESKFLOW_MSG_FAKE_REL_MOVE, 0, 0);
+    }
+  }
 }
 
 void MSWindowsDesks::fakeMouseWheel(int32_t xDelta, int32_t yDelta) const
@@ -452,28 +466,30 @@ LRESULT CALLBACK MSWindowsDesks::secondaryDeskProc(HWND hwnd, UINT msg, WPARAM w
 
 void MSWindowsDesks::deskMouseMove(int32_t x, int32_t y) const
 {
-  // when using absolute positioning with mouse_event(),
-  // the normalized device coordinates range over only
-  // the primary computer.
-  int32_t w = GetSystemMetrics(SM_CXSCREEN);
-  int32_t h = GetSystemMetrics(SM_CYSCREEN);
-  send_mouse_input(
-      MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, (DWORD)((65535.0f * x) / (w - 1) + 0.5f),
-      (DWORD)((65535.0f * y) / (h - 1) + 0.5f), 0
+  if (m_multimon && m_w > 1 && m_h > 1) {
+    const auto normX = static_cast<DWORD>(std::clamp<long>(
+        std::lround((65535.0 * static_cast<double>(x - m_x)) / static_cast<double>(m_w - 1)), 0L, 65535L
+    ));
+    const auto normY = static_cast<DWORD>(std::clamp<long>(
+        std::lround((65535.0 * static_cast<double>(y - m_y)) / static_cast<double>(m_h - 1)), 0L, 65535L
+    ));
+    send_mouse_input(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, normX, normY, 0);
+    return;
+  }
+
+  const int32_t w = (std::max)(GetSystemMetrics(SM_CXSCREEN), 2);
+  const int32_t h = (std::max)(GetSystemMetrics(SM_CYSCREEN), 2);
+  const auto normX = static_cast<DWORD>(
+      std::clamp<long>(std::lround((65535.0 * static_cast<double>(x)) / static_cast<double>(w - 1)), 0L, 65535L)
   );
+  const auto normY = static_cast<DWORD>(
+      std::clamp<long>(std::lround((65535.0 * static_cast<double>(y)) / static_cast<double>(h - 1)), 0L, 65535L)
+  );
+  send_mouse_input(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, normX, normY, 0);
 }
 
 void MSWindowsDesks::deskMouseRelativeMove(int32_t dx, int32_t dy) const
 {
-  // relative moves are subject to cursor acceleration which we don't
-  // want.so we disable acceleration, do the relative move, then
-  // restore acceleration.  there's a slight chance we'll end up in
-  // the wrong place if the user moves the cursor using this system's
-  // mouse while simultaneously moving the mouse on the server
-  // system.  that defeats the purpose of deskflow so we'll assume
-  // that won't happen.  even if it does, the next mouse move will
-  // correct the position.
-
   // save mouse speed & acceleration
   int oldSpeed[4];
   bool accelChanged =
@@ -482,12 +498,12 @@ void MSWindowsDesks::deskMouseRelativeMove(int32_t dx, int32_t dy) const
   // use 1:1 motion
   if (accelChanged) {
     int newSpeed[4] = {0, 0, 0, 1};
-    accelChanged = SystemParametersInfo(SPI_SETMOUSE, 0, newSpeed, 0) ||
+    accelChanged = SystemParametersInfo(SPI_SETMOUSE, 0, newSpeed, 0) &&
                    SystemParametersInfo(SPI_SETMOUSESPEED, 0, newSpeed + 3, 0);
   }
 
   // move relative to mouse position
-  send_mouse_input(MOUSEEVENTF_MOVE, dx, dy, 0);
+  send_mouse_input(MOUSEEVENTF_MOVE, static_cast<DWORD>(dx), static_cast<DWORD>(dy), 0);
 
   // restore mouse speed & acceleration
   if (accelChanged) {
@@ -650,6 +666,10 @@ void MSWindowsDesks::deskThread(const void *vdesk)
 {
   MSG msg;
 
+  // Elevate hook / input synthesis thread priority so WH_MOUSE_LL, WH_KEYBOARD_LL,
+  // and SendInput are never starved by background workloads.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
   // use given desktop for this thread
   Desk *desk = const_cast<Desk *>(static_cast<const Desk *>(vdesk));
   desk->m_threadID = GetCurrentThreadId();
@@ -675,6 +695,21 @@ void MSWindowsDesks::deskThread(const void *vdesk)
     m_deskReady = true;
     m_deskReady.broadcast();
   }
+
+  auto flushAsyncMouse = [this]() {
+    if (m_moveQueued.exchange(false, std::memory_order_acq_rel)) {
+      const int32_t x = m_pendingMoveX.load(std::memory_order_relaxed);
+      const int32_t y = m_pendingMoveY.load(std::memory_order_acquire);
+      deskMouseMove(x, y);
+    }
+    if (m_relMoveQueued.exchange(false, std::memory_order_acq_rel)) {
+      const int32_t dx = m_pendingRelDx.exchange(0, std::memory_order_relaxed);
+      const int32_t dy = m_pendingRelDy.exchange(0, std::memory_order_acquire);
+      if (dx != 0 || dy != 0) {
+        deskMouseRelativeMove(dx, dy);
+      }
+    }
+  };
 
   while (GetMessage(&msg, nullptr, 0, 0)) {
     switch (msg.message) {
@@ -718,31 +753,35 @@ void MSWindowsDesks::deskThread(const void *vdesk)
       break;
 
     case DESKFLOW_MSG_LEAVE:
+      flushAsyncMouse();
       m_isOnComputer = false;
       m_keyLayout = (HKL)msg.wParam;
       deskLeave(desk, m_keyLayout);
       break;
 
     case DESKFLOW_MSG_FAKE_KEY:
+      flushAsyncMouse();
       // Note, this is intended to be HI/LOWORD and not HI/LOBYTE
       send_keyboard_input(HIWORD(msg.lParam), LOWORD(msg.lParam), (DWORD)msg.wParam);
       break;
 
     case DESKFLOW_MSG_FAKE_BUTTON:
+      flushAsyncMouse();
       if (msg.wParam != 0) {
         send_mouse_input((DWORD)msg.wParam, 0, 0, (DWORD)msg.lParam);
       }
       break;
 
     case DESKFLOW_MSG_FAKE_MOVE:
-      deskMouseMove(static_cast<int32_t>(msg.wParam), static_cast<int32_t>(msg.lParam));
-      break;
+      flushAsyncMouse();
+      continue;
 
     case DESKFLOW_MSG_FAKE_REL_MOVE:
-      deskMouseRelativeMove(static_cast<int32_t>(msg.wParam), static_cast<int32_t>(msg.lParam));
-      break;
+      flushAsyncMouse();
+      continue;
 
     case DESKFLOW_MSG_FAKE_WHEEL:
+      flushAsyncMouse();
       // XXX -- add support for x-axis scrolling
       if (msg.lParam != 0) {
         send_mouse_input(MOUSEEVENTF_WHEEL, 0, 0, (DWORD)msg.lParam);
@@ -904,11 +943,14 @@ void MSWindowsDesks::handleCheckDesk()
   checkDesk();
 
   // also check if screen saver is running if on a modern OS and
-  // this is the primary computer.
+  // this is the primary computer; only post on state transition.
   if (m_isPrimary) {
-    BOOL running;
+    BOOL running = FALSE;
     SystemParametersInfo(SPI_GETSCREENSAVERRUNNING, 0, &running, FALSE);
-    PostThreadMessage(m_threadID, DESKFLOW_MSG_SCREEN_SAVER, running, 0);
+    if (running != m_screensaverRunning) {
+      m_screensaverRunning = running;
+      PostThreadMessage(m_threadID, DESKFLOW_MSG_SCREEN_SAVER, running, 0);
+    }
   }
 }
 
