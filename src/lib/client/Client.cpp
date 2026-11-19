@@ -327,28 +327,20 @@ void Client::setOptions(const OptionsList &options)
     return;
   }
 
-  for (auto index = options.begin(); index != options.end(); ++index) {
-    const OptionID id = *index;
+  for (size_t i = 0; i + 1 < options.size(); i += 2) {
+    const OptionID id = options[i];
+    const uint32_t val = options[i + 1];
     if (id == kOptionClipboardSharing) {
-      index++;
-      if (index != options.end()) {
-        if (!*index) {
-          LOG_INFO("clipboard sharing disabled by server");
-        }
-        m_enableClipboard = *index;
+      if (!val) {
+        LOG_INFO("clipboard sharing disabled by server");
       }
+      m_enableClipboard = val != 0;
     } else if (id == kOptionClipboardSharingSize) {
-      index++;
-      if (index != options.end()) {
-        m_maximumClipboardSize = *index;
-      }
+      m_maximumClipboardSize = val;
     } else if (id == kOptionRelativeMouseMoves) {
-      index++;
-      if (index != options.end()) {
-        m_relativeMouseMoves = (*index != 0);
-        if (m_relativeMouseMoves && m_ready && !m_hasRelativeRestorePosition) {
-          saveRelativeRestorePosition();
-        }
+      m_relativeMouseMoves = (val != 0);
+      if (m_relativeMouseMoves && m_ready && !m_hasRelativeRestorePosition) {
+        saveRelativeRestorePosition();
       }
     }
   }
@@ -387,7 +379,9 @@ void Client::sendClipboard(ClipboardID id)
   if (clipboard.open(m_timeClipboard[id])) {
     clipboard.close();
   }
-  m_computer->getClipboard(id, &clipboard);
+  if (!m_computer->getClipboard(id, &clipboard)) {
+    return;
+  }
 
   // check time
   if (m_timeClipboard[id] == 0 || clipboard.getTime() != m_timeClipboard[id]) {

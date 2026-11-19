@@ -12,6 +12,7 @@
 #include "deskflow/ClipboardChunk.h"
 #include "deskflow/ClipboardTypes.h"
 #include "deskflow/KeyTypes.h"
+#include "deskflow/StreamChunker.h"
 
 class Client;
 class ClientInfo;
@@ -134,4 +135,5 @@ private:
   IEventQueue *m_events = nullptr;
   std::string m_clipboardDataCached;
   ClipboardChunkAssemblyState m_clipboardChunkState;
+  ClipboardPacer m_clipboardPacer;
 };

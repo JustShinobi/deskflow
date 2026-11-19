@@ -8,7 +8,9 @@
 
 Chunk::Chunk(size_t size) : m_chunk{new char[size]}
 {
-  memset(m_chunk, 0, size);
+  if (size > 0) {
+    m_chunk[0] = '\0';
+  }
 }
 
 Chunk::~Chunk()

@@ -498,10 +498,9 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
     m_active->enter(x, y, m_seqNum, m_primaryClient->getToggleMask(), forScreensaver);
 
     if (m_enableClipboard) {
-      // send the clipboard data to new active computer
+      // send the clipboard data to new active computer (use cached marshalled size)
       for (ClipboardID id = 0; id < kClipboardEnd; ++id) {
-        // Hackity hackity hack
-        if (m_clipboards[id].m_clipboard.marshall().size() > (m_maximumClipboardSize * 1024)) {
+        if (m_clipboards[id].m_clipboardData.size() > (m_maximumClipboardSize * 1024)) {
           continue;
         }
         m_active->setClipboard(id, &m_clipboards[id].m_clipboard);
@@ -1470,8 +1469,10 @@ void Server::onClipboardChanged(const BaseClientProxy *sender, ClipboardID id, u
   // should be the expected client
   assert(sender == m_clients.find(clipboard.m_clipboardOwner)->second);
 
-  // get data
-  sender->getClipboard(id, &clipboard.m_clipboard);
+  // get data (skip unsupported clipboard slots such as X11 selection on Windows)
+  if (!sender->getClipboard(id, &clipboard.m_clipboard)) {
+    return;
+  }
 
   std::string data = clipboard.m_clipboard.marshall();
   if (data.size() > m_maximumClipboardSize * 1024) {

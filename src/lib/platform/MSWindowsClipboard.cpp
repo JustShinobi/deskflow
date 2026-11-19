@@ -117,11 +117,9 @@ bool MSWindowsClipboard::open(Time time) const
 {
   LOG_DEBUG("open clipboard");
 
-  // The clipboard is a global mutex on Windows. We aren't always going to
-  // get the lock on the first try, so try a few times before giving up.
-  // Based on Chromium's ScopedClipboard::Acquire() retry loop.
-  static const int kMaxRetries = 5;
-  static const int kRetryDelayMs = 5;
+  // Keep retry wait minimal so a contended clipboard cannot stall cursor transitions.
+  static const int kMaxRetries = 3;
+  static const int kRetryDelayMs = 2;
 
   for (int i = 0; i < kMaxRetries; ++i) {
     if (OpenClipboard(m_window)) {

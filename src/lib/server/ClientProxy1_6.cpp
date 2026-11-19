@@ -19,7 +19,8 @@
 
 ClientProxy1_6::ClientProxy1_6(const std::string &name, deskflow::IStream *stream, Server *server, IEventQueue *events)
     : ClientProxy1_5(name, stream, server, events),
-      m_events(events)
+      m_events(events),
+      m_clipboardPacer(events, stream)
 {
   m_events->addHandler(EventTypes::ClipboardSending, this, [this](const auto &e) {
     ClipboardChunk::send(getStream(), e.getDataObject());
@@ -28,6 +29,7 @@ ClientProxy1_6::ClientProxy1_6(const std::string &name, deskflow::IStream *strea
 
 ClientProxy1_6::~ClientProxy1_6()
 {
+  m_clipboardPacer.cancelAll();
   m_events->removeHandler(EventTypes::ClipboardSending, this);
 }
 
@@ -41,10 +43,9 @@ void ClientProxy1_6::setClipboard(ClipboardID id, const IClipboard *clipboard)
 
     std::string data = m_clipboard[id].m_clipboard.marshall();
 
-    size_t size = data.size();
     LOG_DEBUG("sending clipboard %d to \"%s\"", id, getName().c_str());
 
-    StreamChunker::sendClipboard(data, size, id, 0, m_events, this);
+    m_clipboardPacer.enqueue(id, 0, std::move(data));
   }
 }
 

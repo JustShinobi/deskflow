@@ -29,7 +29,8 @@
 ServerProxy::ServerProxy(Client *client, deskflow::IStream *stream, IEventQueue *events)
     : m_client(client),
       m_stream(stream),
-      m_events(events)
+      m_events(events),
+      m_clipboardPacer(events, stream)
 {
   assert(m_client != nullptr);
   assert(m_stream != nullptr);
@@ -52,6 +53,7 @@ ServerProxy::ServerProxy(Client *client, deskflow::IStream *stream, IEventQueue 
 
 ServerProxy::~ServerProxy()
 {
+  m_clipboardPacer.cancelAll();
   setKeepAliveRate(-1.0);
   m_events->removeHandler(EventTypes::StreamInputReady, m_stream->getEventTarget());
   m_events->removeHandler(EventTypes::ClipboardSending, this);
@@ -367,7 +369,7 @@ void ServerProxy::onClipboardChanged(ClipboardID id, const IClipboard *clipboard
   std::string data = IClipboard::marshall(clipboard);
   LOG_DEBUG("sending clipboard %d seqnum=%d", id, m_seqNum);
 
-  StreamChunker::sendClipboard(data, data.size(), id, m_seqNum, m_events, this);
+  m_clipboardPacer.enqueue(id, m_seqNum, std::move(data));
 }
 
 void ServerProxy::flushCompressedMouse()

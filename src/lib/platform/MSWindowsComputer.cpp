@@ -323,12 +323,23 @@ void MSWindowsComputer::leave()
   m_isOnComputer = false;
 }
 
-bool MSWindowsComputer::setClipboard(ClipboardID, const IClipboard *src)
+bool MSWindowsComputer::setClipboard(ClipboardID id, const IClipboard *src)
 {
+  // Windows has only a single system clipboard; ignore X11 selection slot.
+  if (id != kClipboardClipboard) {
+    return true;
+  }
+
   MSWindowsClipboard dst(m_window);
   if (src != nullptr) {
     // save clipboard data
-    return Clipboard::copy(&dst, src);
+    const bool ok = Clipboard::copy(&dst, src);
+    if (ok) {
+      Clipboard::copy(&m_cachedClipboard, src);
+      m_lastReadClipboardSeq = GetClipboardSequenceNumber();
+      m_ownClipboard = true;
+    }
+    return ok;
   } else {
     // assert clipboard ownership
     if (!dst.open(0)) {
@@ -336,28 +347,18 @@ bool MSWindowsComputer::setClipboard(ClipboardID, const IClipboard *src)
     }
     dst.empty();
     dst.close();
+    m_lastReadClipboardSeq = 0;
+    m_ownClipboard = true;
     return true;
   }
 }
 
 void MSWindowsComputer::checkClipboards()
 {
-  // if we think we own the clipboard but we don't then somebody
-  // grabbed the clipboard on this computer without us knowing.
-  // tell the server that this computer grabbed the clipboard.
-  //
-  // this works around bugs in the clipboard viewer chain.
-  // sometimes NT will simply never send WM_DRAWCLIPBOARD
-  // messages for no apparent reason and rebooting fixes the
-  // problem.  since we don't want a broken clipboard until the
-  // next reboot we do this double check.  clipboard ownership
-  // won't be reflected on other computers until we leave but at
-  // least the clipboard itself will work.
   if (m_ownClipboard && !MSWindowsClipboard::isOwnedByDeskflow()) {
     LOG_DEBUG("clipboard changed: lost ownership and no notification received");
     m_ownClipboard = false;
     sendClipboardEvent(EventTypes::ClipboardGrabbed, kClipboardClipboard);
-    sendClipboardEvent(EventTypes::ClipboardGrabbed, kClipboardSelection);
   }
 }
 
@@ -423,10 +424,22 @@ void *MSWindowsComputer::getEventTarget() const
   return const_cast<MSWindowsComputer *>(this);
 }
 
-bool MSWindowsComputer::getClipboard(ClipboardID, IClipboard *dst) const
+bool MSWindowsComputer::getClipboard(ClipboardID id, IClipboard *dst) const
 {
+  if (id != kClipboardClipboard) {
+    return false;
+  }
+
+  const DWORD curSeq = GetClipboardSequenceNumber();
+  if (curSeq != 0 && curSeq == m_lastReadClipboardSeq) {
+    Clipboard::copy(dst, &m_cachedClipboard);
+    return true;
+  }
+
   MSWindowsClipboard src(m_window);
-  Clipboard::copy(dst, &src);
+  Clipboard::copy(&m_cachedClipboard, &src);
+  m_lastReadClipboardSeq = GetClipboardSequenceNumber();
+  Clipboard::copy(dst, &m_cachedClipboard);
   return true;
 }
 
@@ -1451,15 +1464,14 @@ bool MSWindowsComputer::onDisplayChange()
 
 void MSWindowsComputer::onClipboardChange()
 {
-  // now notify client that somebody changed the clipboard (unless
-  // we're the owner).
+  // Notify whenever a local application updates the Windows clipboard, even if
+  // Deskflow already lost ownership on an earlier copy.
   if (!MSWindowsClipboard::isOwnedByDeskflow()) {
     if (m_ownClipboard) {
       LOG_DEBUG("clipboard changed: lost ownership");
       m_ownClipboard = false;
-      sendClipboardEvent(EventTypes::ClipboardGrabbed, kClipboardClipboard);
-      sendClipboardEvent(EventTypes::ClipboardGrabbed, kClipboardSelection);
     }
+    sendClipboardEvent(EventTypes::ClipboardGrabbed, kClipboardClipboard);
   } else if (!m_ownClipboard) {
     LOG_DEBUG("clipboard changed: %s owned", kAppId);
     m_ownClipboard = true;

@@ -118,6 +118,7 @@ TransferState ClipboardChunk::assemble(
       return Oversize;
     }
 
+    dataCached.reserve(state.expectedSize);
     LOG_DEBUG("start receiving clipboard data, expected size=%zu", state.expectedSize);
     return Started;
   } else if (mark == ChunkType::DataChunk) {
@@ -182,15 +183,14 @@ void ClipboardChunk::send(deskflow::IStream *stream, void *data)
   uint32_t sequence;
   std::memcpy(&sequence, &chunk[1], 4);
   uint8_t mark = chunk[5];
-  std::string dataChunk(&chunk[6], clipboardData->m_dataSize);
 
   switch (mark) {
   case ChunkType::DataStart:
-    LOG_VERBOSE("sending clipboard chunk start: size=%s", dataChunk.c_str());
+    LOG_VERBOSE("sending clipboard chunk start");
     break;
 
   case ChunkType::DataChunk:
-    LOG_VERBOSE("sending clipboard chunk data: size=%i", dataChunk.size());
+    LOG_VERBOSE("sending clipboard chunk data: size=%zu", clipboardData->m_dataSize);
     break;
 
   case ChunkType::DataEnd:
@@ -201,5 +201,8 @@ void ClipboardChunk::send(deskflow::IStream *stream, void *data)
     break;
   }
 
-  ProtocolUtil::writef(stream, kMsgDClipboard, id, sequence, mark, &dataChunk);
+  ProtocolUtil::writef(
+      stream, "DCLP%1i%4i%1i%S", id, sequence, mark, static_cast<uint32_t>(clipboardData->m_dataSize),
+      reinterpret_cast<const uint8_t *>(&chunk[6])
+  );
 }

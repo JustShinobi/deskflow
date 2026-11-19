@@ -11,6 +11,7 @@
 #include "base/CursorMotion.h"
 #include "base/MonitorEdge.h"
 
+#include "deskflow/Clipboard.h"
 #include "deskflow/PlatformComputer.h"
 #include "platform/MSWindowsHook.h"
 #include "platform/MSWindowsPowerManager.h"
@@ -314,6 +315,8 @@ private:
   // owner and as a link in the clipboard viewer chain.
   HWND m_window = nullptr;
   DWORD m_clipboardSequenceNumber = 0;
+  mutable DWORD m_lastReadClipboardSeq = 0;
+  mutable Clipboard m_cachedClipboard;
   bool m_ownClipboard = false;
 
   // one desk per desktop and a cond var to communicate with it
