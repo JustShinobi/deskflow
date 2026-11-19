@@ -21,20 +21,21 @@
 #include "deskflow/ProtocolTypes.h"
 #include "deskflow/StreamChunker.h"
 #include "deskflow/ipc/CoreIpc.h"
+#include "net/SocketMultiplexer.h"
 #include "net/TCPSocket.h"
+#include "net/UdpMotionChannel.h"
 #include "server/ClientListener.h"
 #include "server/ClientProxy.h"
 #include "server/ClientProxyUnknown.h"
 #include "server/PrimaryClient.h"
 
-#ifdef _WIN32
 #include <algorithm>
 #include <array>
-#endif
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <optional>
 
 using namespace deskflow::server;
 
@@ -169,6 +170,11 @@ Server::~Server()
   m_events->removeHandler(PrimaryComputerFakeInputBegin, m_inputFilter);
   m_events->removeHandler(PrimaryComputerFakeInputEnd, m_inputFilter);
   m_events->removeHandler(Timer, this);
+  disarmTcpMovePaceTimer();
+  if (m_udpChannel != nullptr) {
+    m_udpChannel->close();
+    m_udpChannel.reset();
+  }
   stopSwitch();
 
   try {
@@ -202,6 +208,59 @@ Server::~Server()
 size_t Server::getMaximumClipboardSizeBytes() const
 {
   return m_maximumClipboardSize * 1024;
+}
+
+void Server::setListener(ClientListener *p)
+{
+  m_clientListener = p;
+  if (p != nullptr && SocketMultiplexer::getInstance() != nullptr) {
+    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, SocketMultiplexer::getInstance());
+    m_udpChannel->openServer(p->getAddress());
+  } else if (m_udpChannel != nullptr) {
+    m_udpChannel->close();
+    m_udpChannel.reset();
+  }
+}
+
+void Server::flushPendingClientMotion()
+{
+  disarmTcpMovePaceTimer();
+  if (m_active != nullptr && m_active != m_primaryClient && (m_udpAbsUnsyncedOnTcp || m_tcpMovePending)) {
+    m_udpAbsUnsyncedOnTcp = false;
+    m_tcpMovePending = false;
+    m_active->mouseMove(m_x, m_y);
+  }
+}
+
+void Server::armTcpMovePaceTimer()
+{
+  if (m_tcpMovePaceTimer != nullptr) {
+    return;
+  }
+  static constexpr double kTcpMovePaceSeconds = 0.002; // 500 Hz max paced flush under Wi-Fi congestion
+  m_tcpMovePaceTimer = m_events->newOneShotTimer(kTcpMovePaceSeconds, nullptr);
+  m_events->addHandler(EventTypes::Timer, m_tcpMovePaceTimer, [this](const auto &) {
+    disarmTcpMovePaceTimer();
+    if (m_tcpMovePending && m_active != nullptr && m_active != m_primaryClient) {
+      auto *stream = m_active->getStream();
+      if (stream != nullptr && stream->getOutputSize() > 4096) {
+        armTcpMovePaceTimer();
+        return;
+      }
+      m_tcpMovePending = false;
+      m_udpAbsUnsyncedOnTcp = false;
+      m_active->mouseMove(m_x, m_y);
+    }
+  });
+}
+
+void Server::disarmTcpMovePaceTimer()
+{
+  if (m_tcpMovePaceTimer != nullptr) {
+    m_events->removeHandler(EventTypes::Timer, m_tcpMovePaceTimer);
+    m_events->deleteTimer(m_tcpMovePaceTimer);
+    m_tcpMovePaceTimer = nullptr;
+  }
 }
 
 bool Server::setConfig(const ServerConfig &config)
@@ -455,6 +514,7 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
   // since that's a waste of time we skip that and just warp the
   // mouse.
   if (m_active != dst) {
+    flushPendingClientMotion();
     // leave active computer
     if (!m_active->leave()) {
       // cannot leave computer
@@ -1077,6 +1137,22 @@ void Server::sendOptions(BaseClientProxy *client) const
     }
   }
 
+  if (m_udpChannel != nullptr && m_udpChannel->boundPort() != 0 && client != m_primaryClient) {
+    const auto reg = m_udpChannel->registerClient(client);
+    optionsList.push_back(kOptionUdpFastPathPort);
+    optionsList.push_back(static_cast<uint32_t>(m_udpChannel->boundPort()));
+    optionsList.push_back(kOptionUdpClientId);
+    optionsList.push_back(reg.clientId);
+    optionsList.push_back(kOptionUdpKey0);
+    optionsList.push_back(reg.key[0]);
+    optionsList.push_back(kOptionUdpKey1);
+    optionsList.push_back(reg.key[1]);
+    optionsList.push_back(kOptionUdpKey2);
+    optionsList.push_back(reg.key[2]);
+    optionsList.push_back(kOptionUdpKey3);
+    optionsList.push_back(reg.key[3]);
+  }
+
   // send the options
   client->resetOptions();
   client->setOptions(optionsList);
@@ -1144,8 +1220,12 @@ void Server::cacheRemoteShape(BaseClientProxy *pClient) const
   if (width <= 0 || height <= 0)
     return;
   const auto name = QString::fromStdString(getName(pClient));
-  Settings::setValue(Settings::Computer::LastWidth.arg(name), width);
-  Settings::setValue(Settings::Computer::LastHeight.arg(name), height);
+  const auto widthKey = Settings::Computer::LastWidth.arg(name);
+  const auto heightKey = Settings::Computer::LastHeight.arg(name);
+  if (Settings::value(widthKey).toInt() == width && Settings::value(heightKey).toInt() == height)
+    return;
+  Settings::setValue(widthKey, width);
+  Settings::setValue(heightKey, height);
   Settings::save(false);
 }
 
@@ -1616,6 +1696,7 @@ void Server::onMouseDown(ButtonID id)
   LOG_VERBOSE("onMouseDown id=%d", id);
   assert(m_active != nullptr);
 
+  flushPendingClientMotion();
   // relay
   m_active->mouseDown(id);
 }
@@ -1625,6 +1706,7 @@ void Server::onMouseUp(ButtonID id)
   LOG_VERBOSE("onMouseUp id=%d", id);
   assert(m_active != nullptr);
 
+  flushPendingClientMotion();
   // relay
   m_active->mouseUp(id);
 }
@@ -1730,17 +1812,20 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
 {
   LOG_VERBOSE("mouse move on secondary: %+d,%+d", dx, dy);
 
-  // TODO: move this to client side and use a qt setting or cli arg instead of env var.
-  const static auto adjustEnv = "DESKFLOW_MOUSE_ADJUSTMENT";
-  if (const char *envVal = std::getenv(adjustEnv); envVal) {
-    try {
-      double multiplier = std::stod(envVal);
-      dx = static_cast<int32_t>(std::round(dx * multiplier));
-      dy = static_cast<int32_t>(std::round(dy * multiplier));
-      LOG_VERBOSE("adjusted mouse x %.2f: %+d,%+d", multiplier, dx, dy);
-    } catch (const std::exception &e) {
-      LOG_ERR("invalid %s value: %s", adjustEnv, e.what());
+  static const std::optional<double> s_mouseMultiplier = []() -> std::optional<double> {
+    if (const char *envVal = std::getenv("DESKFLOW_MOUSE_ADJUSTMENT"); envVal != nullptr) {
+      try {
+        return std::stod(envVal);
+      } catch (const std::exception &e) {
+        LOG_ERR("invalid DESKFLOW_MOUSE_ADJUSTMENT value: %s", e.what());
+      }
     }
+    return std::nullopt;
+  }();
+  if (s_mouseMultiplier.has_value()) {
+    dx = static_cast<int32_t>(std::round(dx * (*s_mouseMultiplier)));
+    dy = static_cast<int32_t>(std::round(dy * (*s_mouseMultiplier)));
+    LOG_VERBOSE("adjusted mouse x %.2f: %+d,%+d", *s_mouseMultiplier, dx, dy);
   }
 
   // mouse move on secondary (client's) computer
@@ -1758,7 +1843,9 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
   // have no idea where it really is.
   if (m_relativeMoves && isLockedToComputerServer()) {
     LOG_VERBOSE("relative move on %s by %d,%d", getName(m_active).c_str(), dx, dy);
-    m_active->mouseRelativeMove(dx, dy);
+    if (m_udpChannel == nullptr || !m_udpChannel->sendMouseRel(m_active, static_cast<uint16_t>(m_seqNum), dx, dy)) {
+      m_active->mouseRelativeMove(dx, dy);
+    }
     return;
   }
 
@@ -1839,7 +1926,7 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
           break;
 
         case Bottom:
-          clearWait = (m_y <= ay + ah - 1 + zoneSize);
+          clearWait = (m_y <= ay + ah - 1 - zoneSize);
           break;
 
         default:
@@ -1895,7 +1982,19 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
     // warp cursor if it moved.
     if (m_x != xOld || m_y != yOld) {
       LOG_VERBOSE("move on %s to %d,%d", getName(m_active).c_str(), m_x, m_y);
-      m_active->mouseMove(m_x, m_y);
+      if (m_udpChannel != nullptr && m_udpChannel->sendMouseAbs(m_active, static_cast<uint16_t>(m_seqNum), m_x, m_y)) {
+        m_udpAbsUnsyncedOnTcp = true;
+      } else {
+        auto *stream = m_active->getStream();
+        if (stream != nullptr && stream->getOutputSize() > 0) {
+          m_tcpMovePending = true;
+          armTcpMovePaceTimer();
+        } else {
+          m_tcpMovePending = false;
+          m_udpAbsUnsyncedOnTcp = false;
+          m_active->mouseMove(m_x, m_y);
+        }
+      }
     }
   }
 }
@@ -1905,6 +2004,7 @@ void Server::onMouseWheel(int32_t xDelta, int32_t yDelta)
   LOG_VERBOSE("onMouseWheel %+d,%+d", xDelta, yDelta);
   assert(m_active != nullptr);
 
+  flushPendingClientMotion();
   // relay
   m_active->mouseWheel(xDelta, yDelta);
 }
@@ -1960,6 +2060,14 @@ bool Server::removeClient(BaseClientProxy *client)
   m_events->removeHandler(ClipboardChanged, client->getEventTarget());
 
   // remove from list
+  if (m_udpChannel != nullptr) {
+    m_udpChannel->unregisterClient(client);
+  }
+  if (m_active == client) {
+    disarmTcpMovePaceTimer();
+    m_tcpMovePending = false;
+    m_udpAbsUnsyncedOnTcp = false;
+  }
   m_clients.erase(getName(client));
   m_clientSet.erase(i);
 

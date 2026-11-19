@@ -28,10 +28,13 @@
 #include "net/IDataSocket.h"
 #include "net/ISocketFactory.h"
 #include "net/SecureSocket.h"
+#include "net/SocketMultiplexer.h"
 #include "net/TCPSocket.h"
+#include "net/UdpMotionChannel.h"
 
 #include <QMetaEnum>
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 
@@ -216,9 +219,10 @@ void Client::getCursorPos(int32_t &x, int32_t &y) const
   m_computer->getCursorPos(x, y);
 }
 
-void Client::enter(int32_t xAbs, int32_t yAbs, uint32_t, KeyModifierMask mask, bool)
+void Client::enter(int32_t xAbs, int32_t yAbs, uint32_t seqNum, KeyModifierMask mask, bool)
 {
   m_active = true;
+  m_enterSeq = seqNum;
   if (m_relativeMouseMoves && m_hasRelativeRestorePosition) {
     xAbs = m_relativeRestoreX;
     yAbs = m_relativeRestoreY;
@@ -315,6 +319,7 @@ void Client::screensaver(bool activate)
 
 void Client::resetOptions()
 {
+  cleanupUdpChannel();
   m_relativeMouseMoves = false;
   m_hasRelativeRestorePosition = false;
   m_computer->resetOptions();
@@ -326,6 +331,11 @@ void Client::setOptions(const OptionsList &options)
     LOG_ERR("options are the incorrect size, can not process them");
     return;
   }
+
+  uint16_t udpPort = 0;
+  uint32_t udpClientId = 0;
+  std::array<uint32_t, 4> udpKey{};
+  uint32_t udpKeyMask = 0;
 
   for (size_t i = 0; i + 1 < options.size(); i += 2) {
     const OptionID id = options[i];
@@ -342,6 +352,33 @@ void Client::setOptions(const OptionsList &options)
       if (m_relativeMouseMoves && m_ready && !m_hasRelativeRestorePosition) {
         saveRelativeRestorePosition();
       }
+    } else if (id == kOptionUdpFastPathPort && val <= 65535) {
+      udpPort = static_cast<uint16_t>(val);
+    } else if (id == kOptionUdpClientId) {
+      udpClientId = val;
+    } else if (id == kOptionUdpKey0) {
+      udpKey[0] = val;
+      udpKeyMask |= (1u << 0);
+    } else if (id == kOptionUdpKey1) {
+      udpKey[1] = val;
+      udpKeyMask |= (1u << 1);
+    } else if (id == kOptionUdpKey2) {
+      udpKey[2] = val;
+      udpKeyMask |= (1u << 2);
+    } else if (id == kOptionUdpKey3) {
+      udpKey[3] = val;
+      udpKeyMask |= (1u << 3);
+    }
+  }
+
+  if (udpPort != 0 && udpClientId != 0 && udpKeyMask == 0x0fu && SocketMultiplexer::getInstance() != nullptr) {
+    cleanupUdpChannel();
+    m_udpChannel = std::make_unique<UdpMotionChannel>(m_events, SocketMultiplexer::getInstance());
+    m_events->addHandler(EventTypes::StreamInputReady, m_udpChannel->getEventTarget(), [this](const auto &) {
+      handleUdpMotion();
+    });
+    if (!m_udpChannel->openClient(m_serverAddress, udpPort, udpClientId, udpKey)) {
+      cleanupUdpChannel();
     }
   }
 
@@ -519,6 +556,7 @@ void Client::cleanupConnecting()
 
 void Client::cleanupConnection()
 {
+  cleanupUdpChannel();
   if (m_stream != nullptr) {
     using enum EventTypes;
     m_events->removeHandler(StreamInputReady, m_stream->getEventTarget());
@@ -528,6 +566,43 @@ void Client::cleanupConnection()
     m_events->removeHandler(SocketDisconnected, m_stream->getEventTarget());
     m_events->removeHandler(ClientDisconnectRequested, m_stream->getEventTarget());
     cleanupStream();
+  }
+}
+
+void Client::cleanupUdpChannel()
+{
+  if (m_udpChannel != nullptr) {
+    m_events->removeHandler(EventTypes::StreamInputReady, m_udpChannel->getEventTarget());
+    m_udpChannel->close();
+    m_udpChannel.reset();
+  }
+}
+
+void Client::handleUdpMotion()
+{
+  if (m_udpChannel == nullptr) {
+    return;
+  }
+
+  UdpMotionChannel::ClientMotionBatch batch{};
+  if (!m_udpChannel->consumeClientMotion(batch)) {
+    return;
+  }
+
+  if (m_server != nullptr) {
+    m_server->noteServerActivity();
+  }
+
+  if (!m_active) {
+    return;
+  }
+
+  const auto currentEnterSeq16 = static_cast<uint16_t>(m_enterSeq);
+  if (batch.hasAbs && batch.absEnterSeq == currentEnterSeq16) {
+    m_computer->mouseMove(batch.absX, batch.absY);
+  }
+  if (batch.hasRel && batch.relEnterSeq == currentEnterSeq16 && (batch.relDx != 0 || batch.relDy != 0)) {
+    m_computer->mouseRelativeMove(batch.relDx, batch.relDy);
   }
 }
 

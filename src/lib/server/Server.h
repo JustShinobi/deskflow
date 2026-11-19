@@ -20,6 +20,7 @@
 
 #include <climits>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -27,6 +28,7 @@ class BaseClientProxy;
 class EventQueueTimer;
 class PrimaryClient;
 class InputFilter;
+class UdpMotionChannel;
 namespace deskflow {
 class Computer;
 }
@@ -171,11 +173,8 @@ public:
   */
   void disconnect();
 
-  //! Store ClientListener pointer
-  void setListener(ClientListener *p)
-  {
-    m_clientListener = p;
-  }
+  //! Store ClientListener pointer and open UDP fast-path channel
+  void setListener(ClientListener *p);
 
   //@}
   //! @name accessors
@@ -363,6 +362,11 @@ private:
   // force the cursor off of \p client
   void forceLeaveClient(const BaseClientProxy *client);
 
+  // ensure authoritative mouse position is synced on TCP before clicks/switches
+  void flushPendingClientMotion();
+  void armTcpMovePaceTimer();
+  void disarmTcpMovePaceTimer();
+
 private:
   class ClipboardInfo
   {
@@ -472,4 +476,9 @@ private:
   bool m_defaultLockToComputerState = false;
   bool m_disableLockToComputer = false;
   bool m_enableClipboard = true;
+
+  mutable std::unique_ptr<UdpMotionChannel> m_udpChannel;
+  EventQueueTimer *m_tcpMovePaceTimer = nullptr;
+  bool m_udpAbsUnsyncedOnTcp = false;
+  bool m_tcpMovePending = false;
 };

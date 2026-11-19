@@ -8,6 +8,7 @@
 
 #include "client/ServerProxy.h"
 
+#include "arch/Arch.h"
 #include "base/IEventQueue.h"
 #include "base/Log.h"
 #include "client/Client.h"
@@ -59,14 +60,29 @@ ServerProxy::~ServerProxy()
   m_events->removeHandler(EventTypes::ClipboardSending, this);
 }
 
+void ServerProxy::noteServerActivity()
+{
+  if (m_keepAliveAlarmTimer != nullptr) {
+    m_lastServerActivityTime = Arch::time();
+    m_hasServerActivity = true;
+  }
+}
+
 void ServerProxy::resetKeepAliveAlarm()
 {
   if (m_keepAliveAlarmTimer != nullptr) {
+    if (m_keepAliveAlarm > 0.0) {
+      noteServerActivity();
+      return;
+    }
     m_events->removeHandler(EventTypes::Timer, m_keepAliveAlarmTimer);
     m_events->deleteTimer(m_keepAliveAlarmTimer);
     m_keepAliveAlarmTimer = nullptr;
+    m_hasServerActivity = false;
   }
   if (m_keepAliveAlarm > 0.0) {
+    m_hasServerActivity = false;
+    m_lastServerActivityTime = Arch::time();
     m_keepAliveAlarmTimer = m_events->newOneShotTimer(m_keepAliveAlarm, nullptr);
     m_events->addHandler(EventTypes::Timer, m_keepAliveAlarmTimer, [this](const auto &) { handleKeepAliveAlarm(); });
   }
@@ -74,6 +90,12 @@ void ServerProxy::resetKeepAliveAlarm()
 
 void ServerProxy::setKeepAliveRate(double rate)
 {
+  if (m_keepAliveAlarmTimer != nullptr) {
+    m_events->removeHandler(EventTypes::Timer, m_keepAliveAlarmTimer);
+    m_events->deleteTimer(m_keepAliveAlarmTimer);
+    m_keepAliveAlarmTimer = nullptr;
+    m_hasServerActivity = false;
+  }
   m_keepAliveAlarm = rate * kKeepAlivesUntilDeath;
   resetKeepAliveAlarm();
 }
@@ -203,14 +225,9 @@ ServerProxy::ConnectionResult ServerProxy::handleMessage(const uint8_t *code)
 {
   const auto result = parseMessage(code);
   if (result == ConnectionResult::Okay) {
-    // send a reply.  this is intended to work around a delay when
-    // running a linux server and an OS X (any BSD?) client.  the
-    // client waits to send an ACK (if the system control flag
-    // net.inet.tcp.delayed_ack is 1) in hopes of piggybacking it
-    // on a data packet.  we provide that packet here.  i don't
-    // know why a delayed ACK should cause the server to wait since
-    // TCP_NODELAY is enabled.
-    ProtocolUtil::writef(m_stream, kMsgCNoop);
+    // Do not echo CNOP back on every received frame: TCP_NODELAY is already
+    // enabled and echoing CNOP doubles bidirectional packet/airtime rate on Wi-Fi.
+    noteServerActivity();
   }
   return result;
 }
@@ -328,6 +345,21 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
 
 void ServerProxy::handleKeepAliveAlarm()
 {
+  if (m_hasServerActivity && m_keepAliveAlarm > 0.0) {
+    const double elapsed = Arch::time() - m_lastServerActivityTime;
+    if (m_keepAliveAlarmTimer != nullptr) {
+      m_events->removeHandler(EventTypes::Timer, m_keepAliveAlarmTimer);
+      m_events->deleteTimer(m_keepAliveAlarmTimer);
+      m_keepAliveAlarmTimer = nullptr;
+    }
+    m_hasServerActivity = false;
+    if (elapsed < m_keepAliveAlarm) {
+      m_keepAliveAlarmTimer = m_events->newOneShotTimer(m_keepAliveAlarm - elapsed, nullptr);
+      m_events->addHandler(EventTypes::Timer, m_keepAliveAlarmTimer, [this](const auto &) { handleKeepAliveAlarm(); });
+      return;
+    }
+  }
+
   LOG_INFO("server is dead");
   requestDisconnect("server is not responding");
 }

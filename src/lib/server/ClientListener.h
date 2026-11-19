@@ -62,6 +62,12 @@ public:
   {
     return m_server;
   }
+
+  //! Get listen network address
+  const NetworkAddress &getAddress() const
+  {
+    return m_address;
+  }
   //@}
 
 private:

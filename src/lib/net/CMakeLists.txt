@@ -46,6 +46,8 @@ add_library(net STATIC
   TCPSocketFactory.cpp
   TCPSocketFactory.h
   TSocketMultiplexerMethodJob.h
+  UdpMotionChannel.cpp
+  UdpMotionChannel.h
 )
 
 target_link_libraries(

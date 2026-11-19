@@ -29,4 +29,12 @@ create_test(
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/net"
 )
 
+create_test(
+  NAME UdpMotionChannelTests
+  DEPENDS net
+  LIBS base arch mt io ${extra_libs}
+  SOURCE UdpMotionChannelTests.cpp UdpMotionChannelTests.h
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/net"
+)
+
 

@@ -17,6 +17,8 @@
 #include "net/NetworkAddress.h"
 
 #include <climits>
+#include <cstdint>
+#include <memory>
 #include <string>
 
 class Event;
@@ -33,6 +35,7 @@ class IStream;
 class IEventQueue;
 class Thread;
 class TCPSocket;
+class UdpMotionChannel;
 
 //! Deskflow client
 /*!
@@ -205,6 +208,8 @@ private:
   void cleanupComputer();
   void cleanupTimer();
   void cleanupStream();
+  void cleanupUdpChannel();
+  void handleUdpMotion();
   void handleConnected();
   void handleConnectionFailed(const Event &event);
   void handleConnectTimeout();
@@ -244,4 +249,6 @@ private:
   int32_t m_relativeRestoreY = 0;
   size_t m_maximumClipboardSize = INT_MAX;
   size_t m_resolvedAddressesCount = 0;
+  uint32_t m_enterSeq = 0;
+  std::unique_ptr<UdpMotionChannel> m_udpChannel;
 };

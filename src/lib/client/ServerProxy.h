@@ -51,6 +51,7 @@ public:
   void onInfoChanged();
   bool onGrabClipboard(ClipboardID);
   void onClipboardChanged(ClipboardID, const IClipboard *);
+  void noteServerActivity();
 
   //@}
 
@@ -129,6 +130,8 @@ private:
   KeyModifierID m_modifierTranslationTable[kKeyModifierIDLast];
 
   double m_keepAliveAlarm = 0.0;
+  double m_lastServerActivityTime = 0.0;
+  bool m_hasServerActivity = false;
   EventQueueTimer *m_keepAliveAlarmTimer = nullptr;
 
   MessageParser m_parser = &ServerProxy::parseHandshakeMessage;
