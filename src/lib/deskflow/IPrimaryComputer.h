@@ -1,12 +1,14 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
- * SPDX-FileCopyrightText: (C) 2025 Deskflow Developers
+ * SPDX-FileCopyrightText: (C) 2025 - 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2003 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 
 #pragma once
+
+#include "base/DirectionTypes.h"
 
 #include "deskflow/KeyTypes.h"
 #include "deskflow/MouseTypes.h"
@@ -101,6 +103,11 @@ public:
   returning.
   */
   virtual void warpCursor(int32_t x, int32_t y) = 0;
+
+  //! Identify the destination edge before positioning an incoming cursor.
+  virtual void setEntryDirection(Direction)
+  {
+  }
 
   //! Register a system hotkey
   /*!

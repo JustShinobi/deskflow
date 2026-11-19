@@ -1,12 +1,15 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
- * SPDX-FileCopyrightText: (C) 2025 Deskflow Developers
+ * SPDX-FileCopyrightText: (C) 2025 - 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2012 - 2016 Synergy App Ltd
  * SPDX-FileCopyrightText: (C) 2002 Chris Schoeneman
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 
 #pragma once
+
+#include "base/CursorMotion.h"
+#include "base/MonitorEdge.h"
 
 #include "deskflow/PlatformComputer.h"
 #include "platform/MSWindowsHook.h"
@@ -84,6 +87,7 @@ public:
   void reconfigure(uint32_t activeSides) override;
   uint32_t activeSides() override;
   void warpCursor(int32_t x, int32_t y) override;
+  void setEntryDirection(Direction direction) override;
   uint32_t registerHotKey(KeyID key, KeyModifierMask mask) override;
   void unregisterHotKey(uint32_t id) override;
   void fakeInputBegin() override;
@@ -272,10 +276,14 @@ private:
 
   // true if system appears to have multiple monitors
   bool m_multimon = false;
+  std::vector<deskflow::MonitorEdge> m_monitorEdges;
+  uint32_t m_monitorSides = 0;
 
   // last mouse position
   int32_t m_xCursor = 0;
   int32_t m_yCursor = 0;
+  deskflow::CursorMotion m_remoteMotion;
+  Direction m_entryDirection = Direction::NoDirection;
 
   // last clipboard
   uint32_t m_sequenceNumber = 0;

@@ -135,6 +135,12 @@ This section contains options used by the application security it will begin wit
 
 This section contains options used when in server mode it will begin with `[server]`
 
+On Windows, `switchMonitorLeft`, `switchMonitorRight`, `switchMonitorTop` and
+`switchMonitorBottom` optionally select an individual monitor for that direction.
+See [monitor edge switching](dev/monitor-edge-switching.md) for selectors,
+transition mapping and limitations. These settings default to empty (desktop
+edge switching) and have no effect on other platforms.
+
 |Option              |    Valid Values   |Description|
 |:-------------------|:-----------------:|:-----------|
 | clipboardSize      | int > 0           | Deskflow will send a maximum of `N` megabytes of clipboard data to another computer when the mouse transitions to that computer. Clients use the server's value for both sending and receiving.|

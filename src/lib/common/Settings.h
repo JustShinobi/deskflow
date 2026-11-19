@@ -1,5 +1,6 @@
 /*
  * Deskflow -- mouse and keyboard sharing utility
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Developers
  * SPDX-FileCopyrightText: (C) 2025 - 2026 Chris Rizzitello <sithlord48@gmail.com>
  * SPDX-FileCopyrightText: (C) 2016 - 2025 Synergy App Ltd
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
@@ -119,6 +120,11 @@ public:
     inline static const auto RelativeMouseMoves = QStringLiteral("server/relativeMouseMoves");
     inline static const auto SwitchDelay = QStringLiteral("server/switchDelay");
     inline static const auto SwitchDoubleTap = QStringLiteral("server/switchDoubleTap");
+    inline static const auto MonitorLayout = QStringLiteral("server/monitorLayout");
+    inline static const auto SwitchMonitorLeft = QStringLiteral("server/switchMonitorLeft");
+    inline static const auto SwitchMonitorRight = QStringLiteral("server/switchMonitorRight");
+    inline static const auto SwitchMonitorTop = QStringLiteral("server/switchMonitorTop");
+    inline static const auto SwitchMonitorBottom = QStringLiteral("server/switchMonitorBottom");
     inline static const auto Win32KeepForeground = QStringLiteral("server/win32KeepForeground");
     inline static const auto XdpClipboardRetried = QStringLiteral("server/xdpClipboardRetried");
     inline static const auto XdpRestoreToken = QStringLiteral("server/xdpRestoreToken");
@@ -126,6 +132,8 @@ public:
 
   struct Computer
   {
+    inline static const auto LastWidth = QStringLiteral("computer_%1/lastWidth");
+    inline static const auto LastHeight = QStringLiteral("computer_%1/lastHeight");
     inline static const auto Aliases = QStringLiteral("computer_%1/aliases");
     inline static const auto Name = QStringLiteral("computer_%1/name");
     inline static const auto HalfDuplexCapsLock = QStringLiteral("computer_%1/halfDuplexCapsLock");
@@ -336,6 +344,11 @@ private:
     , Server::RelativeMouseMoves
     , Server::SwitchDelay
     , Server::SwitchDoubleTap
+    , Server::MonitorLayout
+    , Server::SwitchMonitorLeft
+    , Server::SwitchMonitorRight
+    , Server::SwitchMonitorTop
+    , Server::SwitchMonitorBottom
     , Server::Win32KeepForeground
   };
 
